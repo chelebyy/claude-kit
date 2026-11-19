@@ -1,0 +1,14 @@
+{
+  "id": "sec-review-fileserver",
+  "kind": "review",
+  "roles": ["security", "frontier"],
+  "sandbox": "workspace-write",
+  "mustNotModify": true,
+  "expect": [
+    { "id": "prefix-bypass", "pattern": "(sibling|path\\.sep|separator|trailing (slash|separator)|path\\.relative|public[-_0-9]\\w*|prefix (check|match|bypass)|startsWith[\\s\\S]{0,80}(separator|sibling|sep\\b|slash))" },
+    { "id": "reflected-xss", "pattern": "((server\\.js:2[34]\\b|404|no such file|sendFile|not.found|error page)[\\s\\S]{0,160}(xss|cross.site.scripting|script injection|html injection|unescaped)|(xss|cross.site.scripting|script injection|html injection)[\\s\\S]{0,160}(server\\.js:2[34]\\b|404|no such file|sendFile|not.found|error page))" },
+    { "id": "ssrf-allowlist", "pattern": "(endsWith|suffix|ssrf|server.side request|fetch.{0,60}redirect|redirect.{0,60}(internal|169\\.254|localhost|metadata))" }
+  ],
+  "decoys": { "server.js": [[10, 12], [42, 45]] },
+  "timeoutSec": 600
+}

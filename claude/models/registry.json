@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "about": "Models we have vetted for a role. A model that is not 'approved' here gets no role in Claude Code or Codex, whatever its vendor description claims. See claude/models/README.md.",
+  "statuses": {
+    "approved": "Passed our evaluation (or was grandfathered) and may be used in the listed role with the listed efforts.",
+    "candidate": "Known, not evaluated yet. Must not be used in any role until it passes the evaluation in claude/models/eval/ and the registry is updated.",
+    "unassigned": "Known and deliberately given no role (specialist or not needed). Do not use it for a role.",
+    "retired": "Was approved or available before; replaced. Do not use it for a role."
+  },
+  "codex": {
+    "gpt-6.1-sol": {
+      "status": "approved",
+      "role": "workhorse",
+      "efforts": [
+        "xhigh"
+      ],
+      "serviceTier": "fast",
+      "since": "2026-11-07",
+      "evidence": "grandfathered: in use before the qualification process existed",
+      "evaluated": [
+        "2026-11-08: workhorse role held vs gpt-6.1-terra (both xhigh, fast): blind rubric 19 vs 20.5, within single-run noise; security tasks 15/15, level with gpt-6-astra (high).",
+        "2026-11-08: security-review role (security-review-gate, 5 real commits): 7/10 at xhigh vs gpt-daybreak-blue-latest 10/10; not assigned that role."
+      ],
+      "evaluationEvidence": [
+        "claude/models/eval/results/2026-11-08-terra-fast-and-workhorse.md",
+        "claude/models/eval/results/2026-11-08-codex-security-review.md"
+      ]
+    },
+    "gpt-6-astra": {
+      "status": "approved",
+      "role": "frontier",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "serviceTier": "default",
+      "since": "2026-11-07",
+      "evidence": "grandfathered: in use before the qualification process existed",
+      "evaluated": [
+        "2026-11-08: security-review role (security-review-gate, 5 real commits): 7/10 at high vs gpt-daybreak-blue-latest 10/10; keeps the frontier role, not the security role."
+      ],
+      "evaluationEvidence": [
+        "claude/models/eval/results/2026-11-08-codex-security-review.md"
+      ]
+    },
+    "gpt-6.1-terra": {
+      "status": "approved",
+      "role": "fast",
+      "efforts": [
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "serviceTier": "fast",
+      "since": "2026-11-08",
+      "evidence": "claude/models/eval/results/2026-11-08-terra-fast-and-workhorse.md",
+      "note": "Replaced gpt-6-luna in the fast role: blind rubric 21 vs 11 at medium. Also level with gpt-6.1-sol at xhigh (20.5 vs 19), not enough to move the workhorse role on one run; re-measure before considering it. Efforts measured: medium and xhigh; high is approved as in between; low was not measured.",
+      "evaluated": [
+        "2026-11-08: security-review role (security-review-gate, 5 real commits): 5/10 at high, 3/10 at medium; must not do the security review."
+      ],
+      "evaluationEvidence": [
+        "claude/models/eval/results/2026-11-08-codex-security-review.md"
+      ]
+    },
+    "gpt-6-luna": {
+      "status": "retired",
+      "note": "Replaced by gpt-6.1-terra in the fast role on 2026-11-08 (blind rubric 11 vs 21 at medium; missed two of three seeded bugs in the file-server and general review tasks).",
+      "evidence": "claude/models/eval/results/2026-11-08-terra-fast-and-workhorse.md"
+    },
+    "gpt-daybreak-blue-latest": {
+      "status": "approved",
+      "role": "security",
+      "efforts": [
+        "high",
+        "xhigh"
+      ],
+      "serviceTier": "default",
+      "cyberAccessProgram": "daybreak_blue",
+      "since": "2026-11-08",
+      "evidence": "claude/models/eval/results/2026-11-17-codex-security-review-setups.md",
+      "note": "Codex security review (mandatory on security triggers, or as an extra review) with the security-review-gate skill via codex exec read-only. 2026-11-08, one run per case: 10/10 on 5 real commits with known vulnerabilities (Astra 7, Sol 6.1 7, Terra high 5, Terra medium 3), the only Codex model to catch the plugin/hook code-execution case. 2026-11-17 re-measure, two runs per case: high + security-review-gate 12/20 (best of four setups), high + revised local-security-review 11/20 with more false positives, xhigh 9/20, Codex Security plugin 5/20; so high stays the default and xhigh is not better on this set. Slow: several minutes per review.",
+      "earlier": "2026-11-07: security role vs gpt-6-astra (high, default): blind rubric 19 vs 20 (behind on accuracy: missed the main file-server bug), ~2.2x time, ~2.4x input tokens; not assigned. Re-evaluate on a new Daybreak version."
+    },
+    "gpt-6-sol": {
+      "status": "retired",
+      "note": "Replaced by gpt-6.1-sol."
+    },
+    "gpt-5.6-sol": {
+      "status": "retired"
+    },
+    "gpt-5.6-terra": {
+      "status": "retired"
+    },
+    "gpt-5.6-luna": {
+      "status": "retired"
+    }
+  },
+  "claude": {
+    "claude-opus-5-5": {
+      "status": "approved",
+      "role": "main and reviewer (alias opus)",
+      "since": "2026-11-07",
+      "evidence": "grandfathered: in use before the qualification process existed",
+      "evaluated": "2026-11-08: comparison base for the Sonnet/Haiku subagent evaluation (21 of 22 at medium). Not an approval of itself (conflict-of-interest rule); stays main model and reviewer: the task set is too easy to separate the three models on hard review work.",
+      "evaluationEvidence": "claude/models/eval/results/2026-11-08-claude-subagent-models.md"
+    },
+    "claude-fable-5-2": {
+      "status": "approved",
+      "role": "advisor (alias fable)",
+      "since": "2026-11-10",
+      "evidence": "claude/models/eval/results/2026-11-10-claude-fable-advisor.md",
+      "evaluated": "2026-11-10: high, vs claude-fable-5-1 high, blind-graded by gpt-6-astra: 21 vs 20 of 22, 5/5 automatic checks, no rule violations, ~0.9x the cost and ~0.7x the wall time. The task set is near its ceiling, so this shows no regression rather than a clear gain."
+    },
+    "claude-fable-5-1": {
+      "status": "retired",
+      "note": "Replaced by claude-fable-5-2 in the advisor role on 2026-11-10 (blind rubric 20 vs 21 at high; one false claim in the auth review). Was grandfathered since 2026-11-07.",
+      "evidence": "claude/models/eval/results/2026-11-10-claude-fable-advisor.md"
+    },
+    "claude-sonnet-5-5": {
+      "status": "approved",
+      "role": "subagent worker (alias sonnet)",
+      "since": "2026-11-07",
+      "evidence": "claude/models/eval/results/2026-11-08-claude-subagent-models.md",
+      "evaluated": "2026-11-08: medium, vs claude-opus-5-5 medium, blind-graded by gpt-6-astra: 22 vs 21 of 22 at ~0.4x the cost. Use for ordinary subagent work."
+    },
+    "claude-haiku-5-5": {
+      "status": "approved",
+      "role": "light subagent worker (alias haiku)",
+      "since": "2026-11-07",
+      "evidence": "claude/models/eval/results/2026-11-08-claude-subagent-models.md",
+      "evaluated": "2026-11-08: medium, vs claude-opus-5-5 medium, blind-graded by gpt-6-astra: 21.5 vs 21 of 22 at ~1/26 the cost. Use for exploration, search and simple edits."
+    }
+  }
+}

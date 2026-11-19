@@ -1,0 +1,144 @@
+{
+  "model": "gpt-daybreak-blue-latest",
+  "effort": "high",
+  "tier": "default",
+  "cyberAccessProgram": "daybreak_blue",
+  "date": "2026-11-07",
+  "tasks": [
+    {
+      "id": "fix-pagination",
+      "kind": "fix",
+      "exitStatus": 0,
+      "durationMs": 127813,
+      "usage": {
+        "input_tokens": 350936,
+        "cached_input_tokens": 307584,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3614,
+        "reasoning_output_tokens": 1281
+      },
+      "changed": [
+        "paginate.js"
+      ],
+      "harnessFiles": [
+        ".codex/config.toml",
+        ".codex/project-capabilities.catalog.json",
+        ".codex/project-capabilities.state.json"
+      ],
+      "protectedOk": true,
+      "checkPassed": true,
+      "pass": true
+    },
+    {
+      "id": "review-readonly",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 125857,
+      "usage": {
+        "input_tokens": 412433,
+        "cached_input_tokens": 353280,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4070,
+        "reasoning_output_tokens": 2602
+      },
+      "changed": [],
+      "harnessFiles": [
+        ".codex/config.toml",
+        ".codex/project-capabilities.catalog.json",
+        ".codex/project-capabilities.state.json"
+      ],
+      "readOnlyOk": true,
+      "hits": [
+        "negative-discount",
+        "role-assignment",
+        "float-money"
+      ],
+      "misses": [],
+      "pass": true
+    },
+    {
+      "id": "sec-fix-traversal",
+      "kind": "fix",
+      "exitStatus": 0,
+      "durationMs": 196294,
+      "usage": {
+        "input_tokens": 819729,
+        "cached_input_tokens": 756608,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 6477,
+        "reasoning_output_tokens": 3271
+      },
+      "changed": [
+        "files.js"
+      ],
+      "harnessFiles": [
+        ".codex/config.toml",
+        ".codex/project-capabilities.catalog.json",
+        ".codex/project-capabilities.state.json"
+      ],
+      "protectedOk": true,
+      "checkPassed": true,
+      "pass": true
+    },
+    {
+      "id": "sec-review-auth",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 136201,
+      "usage": {
+        "input_tokens": 479632,
+        "cached_input_tokens": 427520,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4039,
+        "reasoning_output_tokens": 2632
+      },
+      "changed": [],
+      "harnessFiles": [
+        ".codex/config.toml",
+        ".codex/project-capabilities.catalog.json",
+        ".codex/project-capabilities.state.json"
+      ],
+      "readOnlyOk": true,
+      "hits": [
+        "alg-none",
+        "idor",
+        "mass-assignment"
+      ],
+      "misses": [],
+      "decoyCitations": [],
+      "pass": true
+    },
+    {
+      "id": "sec-review-fileserver",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 239627,
+      "usage": {
+        "input_tokens": 574292,
+        "cached_input_tokens": 514944,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 10145,
+        "reasoning_output_tokens": 8052
+      },
+      "changed": [],
+      "harnessFiles": [
+        ".codex/config.toml",
+        ".codex/project-capabilities.catalog.json",
+        ".codex/project-capabilities.state.json"
+      ],
+      "readOnlyOk": true,
+      "hits": [
+        "ssrf-allowlist"
+      ],
+      "misses": [
+        "prefix-bypass",
+        "reflected-xss"
+      ],
+      "decoyCitations": [],
+      "pass": false
+    }
+  ],
+  "passed": 4,
+  "notMeasured": 0,
+  "total": 5
+}

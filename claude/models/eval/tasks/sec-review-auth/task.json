@@ -1,0 +1,14 @@
+{
+  "id": "sec-review-auth",
+  "kind": "review",
+  "roles": ["security", "frontier"],
+  "sandbox": "workspace-write",
+  "mustNotModify": true,
+  "expect": [
+    { "id": "alg-none", "pattern": "(alg.{0,40}none|none.{0,40}alg|unsigned token|signature.{0,60}(skip|bypass))" },
+    { "id": "idor", "pattern": "(idor|insecure direct object|ownerId|auth\\.js:(3[89]|4[01])\\b|getInvoice[\\s\\S]{0,160}(owner|session|any invoice|other users?|any user)|(any|another|other) (logged.in |authenticated )?users?[\\s\\S]{0,40}invoices?)" },
+    { "id": "mass-assignment", "pattern": "(mass.assignment|Object\\.assign|auth\\.js:4[4-7]\\b|updateProfile[\\s\\S]{0,160}(role|any field|arbitrary))" }
+  ],
+  "decoys": { "auth.js": [[24, 35]] },
+  "timeoutSec": 600
+}

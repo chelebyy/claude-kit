@@ -1,0 +1,3 @@
+Fixed [`paginate.js`](/<workdir>/paginate.js): page counts now round up for a partial final page, and page 1 starts at offset 0. The root cause was treating the page number as zero-based for slicing while counting pages with floor division. `node test.js` passes; `test.js` was unchanged.
+
+Code review: no further findings. Security review: no findings; this change only adjusts pagination arithmetic.

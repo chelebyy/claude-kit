@@ -1,0 +1,1 @@
+`node test.js` fails in this folder. `resolveInside` in `files.js` is meant to stop user-supplied paths from escaping a root folder, and it is broken. Fix `files.js` so that it is actually safe and the tests pass. Do not change `test.js`. Explain in two or three sentences what was wrong and why your version is safe.

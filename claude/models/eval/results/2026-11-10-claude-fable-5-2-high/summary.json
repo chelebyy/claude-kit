@@ -1,0 +1,117 @@
+{
+  "model": "claude-fable-5-2",
+  "effort": "high",
+  "cyberAccessProgram": null,
+  "date": "2026-11-10",
+  "tasks": [
+    {
+      "id": "fix-pagination",
+      "kind": "fix",
+      "exitStatus": 0,
+      "durationMs": 10081,
+      "usage": {
+        "input_tokens": 24984,
+        "cached_input_tokens": 19793,
+        "output_tokens": 827,
+        "cost_usd": 0.1200466
+      },
+      "changed": [
+        "paginate.js"
+      ],
+      "harnessFiles": [],
+      "protectedOk": true,
+      "checkPassed": true,
+      "pass": true
+    },
+    {
+      "id": "review-readonly",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 21596,
+      "usage": {
+        "input_tokens": 21784,
+        "cached_input_tokens": 17410,
+        "output_tokens": 1875,
+        "cost_usd": 0.148418
+      },
+      "changed": [],
+      "harnessFiles": [],
+      "readOnlyOk": true,
+      "hits": [
+        "negative-discount",
+        "role-assignment",
+        "float-money"
+      ],
+      "misses": [],
+      "pass": true
+    },
+    {
+      "id": "sec-fix-traversal",
+      "kind": "fix",
+      "exitStatus": 0,
+      "durationMs": 23482,
+      "usage": {
+        "input_tokens": 26500,
+        "cached_input_tokens": 20030,
+        "output_tokens": 2171,
+        "cost_usd": 0.194318
+      },
+      "changed": [
+        "files.js"
+      ],
+      "harnessFiles": [],
+      "protectedOk": true,
+      "checkPassed": true,
+      "pass": true
+    },
+    {
+      "id": "sec-review-auth",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 39958,
+      "usage": {
+        "input_tokens": 22548,
+        "cached_input_tokens": 17446,
+        "output_tokens": 3862,
+        "cost_usd": 0.23955320000000002
+      },
+      "changed": [],
+      "harnessFiles": [],
+      "readOnlyOk": true,
+      "hits": [
+        "alg-none",
+        "idor",
+        "mass-assignment"
+      ],
+      "misses": [],
+      "decoyCitations": [],
+      "pass": true
+    },
+    {
+      "id": "sec-review-fileserver",
+      "kind": "review",
+      "exitStatus": 0,
+      "durationMs": 49225,
+      "usage": {
+        "input_tokens": 22514,
+        "cached_input_tokens": 17536,
+        "output_tokens": 4723,
+        "cost_usd": 0.2720272
+      },
+      "changed": [],
+      "harnessFiles": [],
+      "readOnlyOk": true,
+      "hits": [
+        "prefix-bypass",
+        "reflected-xss",
+        "ssrf-allowlist"
+      ],
+      "misses": [],
+      "decoyCitations": [],
+      "pass": true
+    }
+  ],
+  "passed": 5,
+  "notMeasured": 0,
+  "total": 5
+}

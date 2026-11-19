@@ -1,0 +1,5 @@
+- **Critical — `auth.js:19`: Forged session tokens.** The verifier skips the signature check when the token header says `{"alg":"none"}`. An attacker can supply a token whose payload is `{"sub":"victim-id","role":"admin","exp":4102444800}` with any signature segment. The token is accepted without knowing `TOKEN_SECRET`, allowing impersonation and forged administrator claims.
+
+- **High — `auth.js:41`: Access to other users’ invoices.** `getInvoice` returns any invoice found by ID without checking `session` or `invoice.ownerId`. An authenticated attacker can request another user’s invoice ID and receive the full invoice.
+
+- **High — `auth.js:46`: Privilege escalation through profile updates.** A profile update body such as `{"role":"admin"}` is copied directly onto the user record. When a token is subsequently issued for that user, `issueToken` includes the modified role, allowing the attacker to obtain an administrator token.

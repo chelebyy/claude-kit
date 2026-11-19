@@ -1,0 +1,3 @@
+**High — SSRF through `/preview`** — [server.js:33](<workdir>/server.js:33)
+
+An attacker can request `/preview?url=http://imgcdn.net.attacker.example/`; `hostname.endsWith('imgcdn.net')` accepts that hostname. This lets the attacker make the server fetch an attacker-controlled destination and return its response. The endpoint’s allowlist can therefore be bypassed to proxy requests to hosts outside the intended list.

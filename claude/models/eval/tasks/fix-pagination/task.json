@@ -1,0 +1,9 @@
+{
+  "id": "fix-pagination",
+  "kind": "fix",
+  "roles": ["workhorse", "fast", "frontier"],
+  "sandbox": "workspace-write",
+  "check": { "command": "node test.js" },
+  "protected": ["test.js"],
+  "timeoutSec": 600
+}

@@ -1,0 +1,9 @@
+{
+  "id": "sec-fix-traversal",
+  "kind": "fix",
+  "roles": ["security", "workhorse", "frontier"],
+  "sandbox": "workspace-write",
+  "check": { "command": "node test.js" },
+  "protected": ["test.js"],
+  "timeoutSec": 600
+}

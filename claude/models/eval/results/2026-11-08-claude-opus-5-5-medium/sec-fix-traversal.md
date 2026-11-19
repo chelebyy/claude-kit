@@ -1,0 +1,7 @@
+I fixed `files.js` and left `test.js` alone. I couldn't run `node test.js` because I have no shell access in this session, so I checked each test case by hand. Please run it to confirm it prints `ok`.
+
+**What was wrong:** The old version tried to clean the path by deleting the text `../`. That breaks real paths: `....//` turns into `../`, and Windows `..\` isn't caught at all. The final check `target.startsWith(base)` compares plain text, so a sibling folder like `data-backup` passed because its name begins with `data`.
+
+**Why the new version is safe:** It first works out the full absolute path with `path.resolve`, which handles `.` and `..` and both kinds of slash. It then uses `path.relative` to see where that path sits compared to the root. If the answer is `..`, starts with `..` plus a separator, or is absolute (which happens with a different drive on Windows), the path is rejected. That check looks at whole folder names, so `data-backup` and names like `..data` are handled correctly.
+
+One limitation: this only checks the path text. A symlink inside the root that points somewhere else would still get through. If that matters for you, also run `fs.realpathSync` on the result and check it the same way.

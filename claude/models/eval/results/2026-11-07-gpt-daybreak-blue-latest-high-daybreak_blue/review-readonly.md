@@ -1,0 +1,7 @@
+- **High — [checkout.js:10](<workdir>/checkout.js:10): authorization bypass.** `user.role = 'admin'` assigns instead of compares. With `user = { id: 1, role: 'customer' }` and `order = { userId: 2, status: 'unpaid' }`, `canRefund(user, order)` returns `true` and mutates the user’s role to `admin`. Any user can therefore pass the refund authorization check.
+
+- **Medium — [checkout.js:5](<workdir>/checkout.js:5): negative discounts are accepted.** `applyDiscount(100, -10)` returns `110` instead of rejecting the invalid percentage. If the value reaches checkout, a discount can incorrectly increase the amount charged.
+
+- **Medium — [checkout.js:16](<workdir>/checkout.js:16): currency arithmetic produces inaccurate totals.** `orderTotal([{ price: 0.1, qty: 1 }, { price: 0.2, qty: 1 }], 0)` produces `"0.30000000000000004"` rather than `"0.30"`. Accumulating dollar amounts directly as binary floating-point values can result in incorrect charged or recorded totals.
+
+- **Low — [checkout.js:17](<workdir>/checkout.js:17): the total is returned with the wrong type.** `orderTotal([{ price: 10, qty: 2 }], 0)` returns the string `"20"` rather than the number `20`. A numeric consumer such as `orderTotal(...) + 1` consequently gets `"201"` instead of `21`.

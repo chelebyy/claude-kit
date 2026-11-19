@@ -1,0 +1,13 @@
+{
+  "id": "review-readonly",
+  "kind": "review",
+  "roles": ["workhorse", "fast", "frontier"],
+  "sandbox": "workspace-write",
+  "mustNotModify": true,
+  "expect": [
+    { "id": "negative-discount", "pattern": "(negative|< ?0|below zero|less than (0|zero))" },
+    { "id": "role-assignment", "pattern": "(assign|=== ?|==|comparison).{0,80}role|role.{0,80}(assign|=== ?|==|comparison)" },
+    { "id": "float-money", "pattern": "(float|floating|rounding|cents|toFixed|precision)" }
+  ],
+  "timeoutSec": 600
+}
