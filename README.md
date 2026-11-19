@@ -79,6 +79,7 @@ Kurallar her makinede aynıdır. Profil yalnızca incelemelerin hangi yoldan yap
 ## Depo yapısı
 
 - `install.mjs`, `installer/`: kurulum programı ve testleri (`node --test installer/test/`).
+- Testler: CI (Windows, Linux, macOS; Node 22, 24, 26) kurulum programını ve hook'ları dener. Değerlendirme çalıştırıcısının testleri (`node --test claude/models/eval/run.test.cjs`) ağ iznini (`--allow-net`) tanıyan bir Node ister, bu yüzden CI'da Node 26 ile çalışır; gerçek `codex sandbox` isteyen üç testi Codex CLI yoksa atlanır.
 - `claude/`: Claude Code'a kurulan kurallar, hook'lar, ajanlar, skill'ler ve model kaydı (`claude/models/README.md`: kayıt ve değerlendirme süreci).
 - `codex/AGENTS.md`: Codex kuralları.
 - `agents/skills/`: Codex güvenlik incelemesi skill'i (kaynağı ve lisansı `agents/skills/README.md`).

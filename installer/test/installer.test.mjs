@@ -629,10 +629,16 @@ test('codex config: kaçışlı, tırnaklı ve noktalı anahtarlar', () => {
 test('install.mjs: --yes=no planı uygulamaz, anlaşılmayan değer reddedilir; CODEX_HOME başka dizinse durur', async () => {
   const { spawnSync } = await import('node:child_process');
   const flags = Object.entries(fullFlags).map(([k, v]) => `--${k}=${v}`);
+  // Program önce `claude --version` çalıştırır; Claude Code kurulu olmayan makinelerde (CI) PATH'in
+  // başına sürüm yazan sahte bir claude konur.
+  const bin = tmpHome();
+  if (process.platform === 'win32') fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo 2.1.400 (Claude Code)\r\n');
+  else { fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho "2.1.400 (Claude Code)"\n'); fs.chmodSync(path.join(bin, 'claude'), 0o755); }
+  const PATH = `${bin}${path.delimiter}${process.env.PATH || process.env.Path || ''}`;
   const run = (extra, env = {}) => {
     const home = tmpHome();
     const r = spawnSync(process.execPath, [path.join(kitRoot, 'install.mjs'), '--home', home, '--no-tui', ...flags, ...extra],
-      { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', ...env } });
+      { encoding: 'utf8', env: { ...process.env, PATH, Path: PATH, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', ...env } });
     return { r, home };
   };
   let { r, home } = run(['--yes=no']);
