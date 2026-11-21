@@ -468,10 +468,25 @@ test('iç içe kabuklar tarama süresini katlamaz; bütçeyi aşan girdi engelle
 });
 
 test('tekrarlanan kabuk seçenekleri taramayı karesel yavaşlatıp hook zaman aşımına sokamaz', () => {
-  // sh -o x sh -o x …: her kabuk adında seçenek taraması listenin sonuna kadar gider.
-  const t0 = Date.now();
-  denied(bash('sh -o '.repeat(36000) + '; codex exec -m gpt-0-unapproved -'));
-  assert.ok(Date.now() - t0 < 2000, `${Date.now() - t0} ms sürdü`);
+  // sh -o x sh -o x …: her kabuk adında seçenek taraması listenin sonuna kadar gider; tarama karesel
+  // büyür ve onu SCAN_STEPS bütçesi durdurur. Bütçe dolunca çağrı "too complex" diye engellenir, bu
+  // yüzden 9000 ve 36000 tekrar aynı işi yapar. Süreyi sabit bir sınırla değil iki boyun oranıyla
+  // ölçeriz: oran makineden bağımsızdır (bütçe olmasaydı 4 kat girdi ~16 kat sürerdi). Mutlak sınır
+  // hook'un 5 sn zaman aşımıdır (installer/core.mjs); Node'un açılışına pay bırakmak için 4 sn.
+  const cmd = n => bash('sh -o '.repeat(n) + '; codex exec -m gpt-0-unapproved -');
+  const fastest = n => {
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = process.hrtime.bigint();
+      denied(cmd(n), /too large or too deeply nested to check/);
+      best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return best;
+  };
+  const small = fastest(9000);
+  const large = fastest(36000);
+  assert.ok(large < 2.5 * small, `4 kat girdi ${(large / small).toFixed(1)} kat sürdü (${small.toFixed(0)} ms → ${large.toFixed(0)} ms)`);
+  assert.ok(large < 4000, `${large.toFixed(0)} ms sürdü`);
   // Sıradan bir komut bundan etkilenmez.
   allowed(bash('set -o pipefail; bash -o errexit -c "ls"; codex exec -m gpt-6-astra -c model_reasoning_effort=high -'));
 });
