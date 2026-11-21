@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   FILES, PLUGINS, SKILLS, MCP, SKILLS_CLI, PROFILE_PATH, MANIFEST_PATH,
-  renderTemplate, renderProfile, mergeSettings, inspectCodexTier, fixCodexTier, normalizeText,
+  renderProfile, mergeSettings, inspectCodexTier, fixCodexTier, normalizeText,
   marketplaceMatches, installedForUser,
 } from './core.mjs';
 
@@ -125,16 +125,18 @@ export function inspectMachine({ home, kitRoot, platform = process.platform, env
   m.rulesConflict = a => FILES.filter(f => f.kind === 'rules' && (!f.when || a[f.when])).some(f => {
     const cur = readText(path.join(home, f.dest));
     if (cur == null) return false;
-    const want = renderTemplate(readText(path.join(kitRoot, f.src)), a);
+    const want = readText(path.join(kitRoot, f.src));
     return normalizeText(cur) !== normalizeText(want);
   });
   return m;
 }
 
-// Kural metni chelebyy'yi onaysız kurulabilen kaynaklar arasında sayıyor mu?
-export function rulesTrustChelebyy(text) {
+// Kural metni (eski kurulumdan kalan) bir skill'i kullanıcıya sormadan kurdurtuyor mu? Kit artık her
+// kurulumda sordurur; eski cümle "güvenilir kaynaktan onay beklemeden kur" idi. Metin bütün olarak
+// aranır: Markdown'da satıra bölünmüş cümle de ("without waiting for\napproval") yakalanır.
+export function rulesInstallSkillsUnasked(text) {
   if (text == null) return false;
-  return text.split(/\r?\n/).some(l => /`chelebyy`/.test(l) && /(trusted source|Güvenilir kaynak)/i.test(l));
+  return /onay\s+beklemeden\s+kur|without\s+waiting\s+for\s+approval/i.test(String(text));
 }
 
 // Kurulacak dosyaların listesi: [{ dest (mutlak), rel (ev dizinine göre), content, kind }]
@@ -146,7 +148,6 @@ export function desiredFiles(a, m) {
     const items = f.dir ? listFiles(src).map(r => [path.join(src, r), `${f.dest}/${r}`]) : [[src, f.dest]];
     for (const [s, rel] of items) {
       let content = fs.readFileSync(s, 'utf8');
-      if (f.template) content = renderTemplate(content, a);
       out.push({ dest: path.join(m.home, rel), rel, content: normalizeText(content), kind: f.kind || 'kit' });
     }
   }
@@ -171,11 +172,20 @@ export function buildPlan(a, m) {
     else if (f.kind === 'rules' && a.onConflict !== 'replace') status = 'keep';
     else status = 'update';
     steps.push({ group: 'dosya', label: `~/${f.rel}`, status, file: f });
-    // Korunan eski kural dosyası chelebyy'yi hâlâ onaysız kaynak sayıyorsa "güvenme" cevabı o dosyada
-    // geçersiz kalır (Codex için onaysız kuruluma izin veren tek şey bu metin).
-    if (status === 'keep' && !a.trustChelebyy && rulesTrustChelebyy(cur)) {
+    // Korunan eski kural dosyası skill'leri hâlâ sormadan kurdurtuyorsa kitin "her kurulumda sor"
+    // kuralı o dosyada geçersiz kalır (Codex için onaysız kuruluma izin veren tek şey bu metin).
+    if (status === 'keep' && rulesInstallSkillsUnasked(cur)) {
       steps.push({ group: 'dosya', label: `~/${f.rel}`, status: 'manual',
-        manual: 'korunan dosya chelebyy\'yi hâlâ onaysız skill kaynağı sayıyor; o cümleden chelebyy\'yi çıkar ya da kurulumu --on-conflict=replace ile çalıştır' });
+        manual: 'korunan dosya skill\'leri hâlâ kullanıcıya sormadan kurdurtuyor; o cümleyi değiştir ya da kurulumu --on-conflict=replace ile çalıştır' });
+    }
+  }
+
+  // Codex seçilmediyse AGENTS.md kurulmaz, ama eski bir kurulumdan kalan dosya Codex'te hâlâ geçerlidir.
+  if (!a.codex) {
+    const rel = '.codex/AGENTS.md';
+    if (rulesInstallSkillsUnasked(readText(path.join(m.home, rel)))) {
+      steps.push({ group: 'dosya', label: `~/${rel}`, status: 'manual',
+        manual: 'Codex seçilmedi ama bu dosya skill\'leri hâlâ kullanıcıya sormadan kurdurtuyor; Codex kullanıyorsan o cümleyi değiştir, kullanmıyorsan dosyayı kaldır' });
     }
   }
 

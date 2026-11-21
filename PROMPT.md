@@ -9,7 +9,6 @@ claude-kit'i kur. Adımlar:
    (zaten varsa `git -C ~/claude-kit pull --ff-only`). Klonladığın kopyadaki README.md'yi oku.
 2. Bana şu soruları tek tek sor, cevaplarımı tahmin etme:
    - Codex (OpenAI) aboneliğin var mı? Varsa: Daybreak (cyber erişim programı daybreak_blue) var mı?
-   - chelebyy kaynağındaki skill'ler onay sorulmadan kurulabilsin mi?
    - Auto mod açılsın mı? Açılacaksa ve settings.json'da autoMode.environment yoksa,
      kit sahibinin yığın tanımı eklensin mi (mine) yoksa dokunulmasın mı (keep)?
    - Fable danışman, takım modu ve arayüz tercihleri (tema auto, tam ekran, latest kanalı) açılsın mı?

@@ -50,7 +50,6 @@ Hook'lar Node'un mutlak yoluyla kaydedilir. Node'u başka bir yere taşır ya da
 **Sorulanlar:**
 
 - Daybreak erişimi var mı?
-- `chelebyy` skill kaynağına güvenilsin mi?
 - Auto mod, Fable danışmanı, takım modu, dil ve arayüz tercihleri uygulansın mı?
 - İsteğe bağlı MCP sunucuları: Context7, Exa, Figma (yalnızca uzak sunucular). Anahtar isteyenleri program kurmaz, sana kendi terminalinde çalıştıracağın komutu gösterir. Yerel komutla çalışan MCP'leri (ör. Lemma, Serena) program kurmaz; istersen kendin eklersin.
 
