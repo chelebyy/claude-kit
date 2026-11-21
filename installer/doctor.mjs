@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { HOOKS, PLUGINS, SKILLS, MCP, MIN_NODE, MIN_CLAUDE, PROFILE_PATH, compareVersions, normalizeText, findHook, marketplaceMatches, LEGACY_SKILL_ALLOWS } from './core.mjs';
-import { inspectMachine, desiredFiles, readText, claudeVersion, runCommand, rulesTrustChelebyy } from './system.mjs';
+import { inspectMachine, desiredFiles, readText, claudeVersion, runCommand, rulesInstallSkillsUnasked } from './system.mjs';
 
 function runHook(file, input, env = {}, nodeExe = process.execPath) {
   const r = spawnSync(nodeExe, [file], { input: JSON.stringify(input), encoding: 'utf8', timeout: 20000, env: { ...process.env, ...env } });
@@ -71,10 +71,8 @@ export function doctor({ home, kitRoot, run = runCommand, env = process.env }) {
     const legacy = allow.filter(x => LEGACY_SKILL_ALLOWS.includes(x));
     if (legacy.length) add('skill-allow', 'warn', `onaysız skill kurulumu izinleri duruyor (${legacy.join(', ')}); projedeki sahte bir npx/skills programı onaysız çalışabilir, kurulumu yeniden çalıştır`);
   }
-  if (!a.trustChelebyy) {
-    for (const rel of ['.claude/CLAUDE.md', ...(a.codex ? ['.codex/AGENTS.md'] : [])]) {
-      if (rulesTrustChelebyy(readText(path.join(home, rel)))) add(`trust:${rel}`, 'warn', `~/${rel} chelebyy'yi hâlâ onaysız skill kaynağı sayıyor, profil ise saymıyor`);
-    }
+  for (const rel of ['.claude/CLAUDE.md', ...(a.codex ? ['.codex/AGENTS.md'] : [])]) {
+    if (rulesInstallSkillsUnasked(readText(path.join(home, rel)))) add(`skill-ask:${rel}`, 'warn', `~/${rel} skill'leri hâlâ kullanıcıya sormadan kurdurtuyor; o cümleyi değiştir ya da kurulumu --on-conflict=replace ile yeniden çalıştır`);
   }
 
   for (const p of PLUGINS) {

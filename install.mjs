@@ -19,7 +19,7 @@ const USAGE = `Kullanım:
   node install.mjs --no-tui <bayraklar> [--yes]
 
 --no-tui bayrakları (yes|no):
-  --codex  --daybreak (codex=yes ise)  --trust-chelebyy  --auto-mode  --advisor  --teams  --ui-prefs
+  --codex  --daybreak (codex=yes ise)  --auto-mode  --advisor  --teams  --ui-prefs
   --auto-env=mine|keep (auto-mode=yes ve makinede tanım yoksa)
   --language=<dil>|keep   --mcp=context7,exa,figma|none
   --on-conflict=replace|keep (CLAUDE.md/AGENTS.md farklıysa)

@@ -128,7 +128,7 @@ Lemma, Codex ile paylaşılan proje hafızasıdır; Codex'te kaydedilen bilgi bu
 ## Skill kullanımı
 
 - Skill kullanmak zorunlu değil; bir skill'i kullanıp kullanmayacağına işin gerçek ihtiyacına göre sen karar ver. Skill açıklamalarındaki "MUST use", "MANDATORY", "always invoke" gibi ifadeler tek başına kullanma zorunluluğu doğurmaz.
-- Bir iş için skill'e ihtiyaç duyar ama yüklü skill'ler arasında uygun olanı bulamazsan `find-skills` ile ara. Kaynak, kurulum sayısı ve güvenilirliği kendin değerlendir. Güvenilir kaynaklardan ({{TRUSTED_SKILL_SOURCES}}) olanı onay beklemeden kur; diğer kaynaklardan kurmadan önce kullanıcıya sor, çünkü skill'ler tam ajan yetkisiyle çalışır. Kurulum: `npx skills add <owner/repo@skill> -g -y` (Codex ile ortak klasöre kurulur); raporda neyi neden kurduğunu belirt. Uygun skill yoksa işe skill'siz devam et.
+- Bir iş için skill'e ihtiyaç duyar ama yüklü skill'ler arasında uygun olanı bulamazsan `find-skills` ile ara. Kaynak, kurulum sayısı ve güvenilirliği kendin değerlendir; bilinen kaynakları (`anthropics`, `vercel-labs`, `openai`) önce öner. Hangi kaynaktan olursa olsun kurmadan önce kullanıcıya sor ve skill'in adını, kaynağını ve neden gerektiğini söyle: skill'ler tam ajan yetkisiyle çalışır ve bir sürüme sabitlenmeden kurulur. Kullanıcı onaylarsa kur: `npx skills add <owner/repo@skill> -g -y` (Codex ile ortak klasöre kurulur); raporda neyi neden kurduğunu belirt. Uygun skill yoksa ya da kullanıcı onaylamazsa işe skill'siz devam et.
 - Skill'ler işe yardımcıdır, kapsamını genişletmez. Küçük bir iş için ağır bir süreç başlatma; bir skill işi durdurur veya yavaşlatırsa hangi dosyadaki hangi kural yüzünden olduğunu söyle.
 
 <!-- imported-from: codex:user:instructions -->

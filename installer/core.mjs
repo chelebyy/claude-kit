@@ -7,16 +7,13 @@ export const MIN_NODE = 22;
 // sabitlenmiş market kaynakları (eski kurulumun en düşük sürümü).
 export const MIN_CLAUDE = '2.1.324';
 export const SKILLS_CLI = 'skills@1.9.0';
-export const BASE_TRUSTED = ['anthropics', 'vercel-labs', 'openai'];
-export const OPTIONAL_TRUSTED = 'chelebyy';
-export const TRUST_PLACEHOLDER = '{{TRUSTED_SKILL_SOURCES}}';
 export const PROFILE_PATH = '.claude/rules/claude-kit-profile.md';
 export const MANIFEST_PATH = '.claude/claude-kit.json';
 
 // Kurulan dosyalar. `rules`: kullanıcının kendi hali olabilir, fark varsa sorulur.
 // Diğerleri kitin parçasıdır: fark varsa yedek alınıp güncellenir. `dir`: klasördeki her dosya.
 export const FILES = [
-  { src: 'claude/CLAUDE.md', dest: '.claude/CLAUDE.md', kind: 'rules', template: true },
+  { src: 'claude/CLAUDE.md', dest: '.claude/CLAUDE.md', kind: 'rules' },
   { src: 'claude/rules/context7.md', dest: '.claude/rules/context7.md' },
   { src: 'claude/hooks/auto-plugins.cjs', dest: '.claude/hooks/auto-plugins.cjs' },
   { src: 'claude/hooks/model-watch.cjs', dest: '.claude/hooks/model-watch.cjs' },
@@ -25,7 +22,7 @@ export const FILES = [
   { src: 'claude/agents', dest: '.claude/agents', dir: true },
   { src: 'claude/skills/local-code-review', dest: '.claude/skills/local-code-review', dir: true },
   { src: 'claude/skills/local-security-review', dest: '.claude/skills/local-security-review', dir: true },
-  { src: 'codex/AGENTS.md', dest: '.codex/AGENTS.md', kind: 'rules', template: true, when: 'codex' },
+  { src: 'codex/AGENTS.md', dest: '.codex/AGENTS.md', kind: 'rules', when: 'codex' },
   { src: 'agents/skills/security-review-gate', dest: '.agents/skills/security-review-gate', dir: true, when: 'codex' },
   { src: 'agents/skills/codex-sentinel/references', dest: '.agents/skills/codex-sentinel/references', dir: true, when: 'codex' },
   { src: 'agents/skills/shared', dest: '.agents/skills/shared', dir: true, when: 'codex' },
@@ -95,9 +92,6 @@ export const QUESTIONS = [
     ask: (a, c) => a.codex && !c.codexOnPath, skip: false, def: () => true, optional: true },
   { key: 'fixCodexTier', flag: 'fix-codex-tier', type: 'bool', text: '~/.codex/config.toml içinde service_tier "fast" değil. Düzeltilsin mi (yedek alınır)?',
     ask: (a, c) => a.codex && c.codexTier.needsFix && !c.codexTier.ambiguous, skip: false, def: () => true, optional: true },
-  { key: 'trustChelebyy', flag: 'trust-chelebyy', type: 'bool', text: 'chelebyy (GitHub) kaynağındaki skill\'ler onay sorulmadan kurulabilsin mi?',
-    help: 'Evet dersen bu hesaptan gelen skill\'ler, anthropics/openai/vercel-labs gibi, sorulmadan kurulur. Skill\'ler tam ajan yetkisiyle çalışır. Cevap kurallardaki güvenilir kaynak listesine yazılır.',
-    def: () => false },
   { key: 'autoMode', flag: 'auto-mode', type: 'bool', text: 'Claude Code varsayılan olarak auto modda çalışsın mı (permissions.defaultMode = auto)?',
     help: 'Auto modda araç çağrıları sınıflandırıcı denetiminde onay sorulmadan çalışır. Hayır dersen ve makinede auto açıksa kapatılır.', def: () => true },
   { key: 'autoEnv', flag: 'auto-env', type: 'choice', choices: ['mine', 'keep'], text: 'Auto mod ortam tanımı (autoMode.environment) eklensin mi?',
@@ -154,14 +148,6 @@ export function answersFromFlags(flags, ctx) {
   return { answers: a, errors };
 }
 
-export function trustedSources(a) {
-  return a.trustChelebyy ? [...BASE_TRUSTED, OPTIONAL_TRUSTED] : [...BASE_TRUSTED];
-}
-
-export function renderTemplate(text, a) {
-  return text.split(TRUST_PLACEHOLDER).join(trustedSources(a).map(s => `\`${s}\``).join(', '));
-}
-
 export function renderProfile(a) {
   const yn = v => (v ? 'var' : 'yok');
   return [
@@ -172,7 +158,6 @@ export function renderProfile(a) {
     '',
     `- Codex: ${yn(a.codex)}`,
     `- Daybreak (cyber erişim programı \`daybreak_blue\`): ${yn(a.codex && a.daybreak)}`,
-    `- Onaysız skill kurulabilen kaynaklar: ${trustedSources(a).map(s => `\`${s}\``).join(', ')}`,
     '',
   ].join('\n');
 }
@@ -240,7 +225,7 @@ export const hookRegistered = (groups, h, ctx, opts) => findHook(groups, h, ctx,
 // bakar, kötü niyetli bir projedeki sahte `skills` programı bu izinlerle onaysız çalışırdı. Skill
 // kurulumu artık her seferinde onaydan geçer (auto modda sınıflandırıcıdan).
 export const LEGACY_SKILL_ALLOWS = [
-  ...[...BASE_TRUSTED, OPTIONAL_TRUSTED].map(s => `Bash(npx skills add ${s}/*)`),
+  ...['anthropics', 'vercel-labs', 'openai', 'chelebyy'].map(s => `Bash(npx skills add ${s}/*)`),
   'Bash(npx skills add *)',
   'Bash(npx skills find *)',
 ];
