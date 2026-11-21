@@ -549,6 +549,11 @@ test('plan: korunan kural dosyası skill\'leri hâlâ sormadan kurdurtuyorsa uya
   assert.ok(manualFor('.claude/CLAUDE.md', 'Güvenilir kaynaklardan (`anthropics`, `vercel-labs`, `openai`, `chelebyy`) olanı onay beklemeden kur.\n', { codex: false }));
   assert.ok(manualFor('.claude/CLAUDE.md', 'Güvenilir kaynaklardan (`anthropics`, `vercel-labs`, `openai`) olanı onay beklemeden kur.\n', { codex: false }));
   assert.ok(manualFor('.codex/AGENTS.md', 'Install a suitable one from a trusted source (`anthropics`, `openai`) without waiting for approval.\n', {}));
+  // Markdown'da satıra bölünmüş ve fazla boşluklu cümle.
+  assert.ok(manualFor('.codex/AGENTS.md', 'Install a suitable one from a trusted source without waiting for\napproval.\n', {}));
+  assert.ok(manualFor('.claude/CLAUDE.md', 'Güvenilir kaynaklardan olanı onay  beklemeden\r\n  kur.\n', { codex: false }));
+  // Codex seçilmese de eski kurulumdan kalan AGENTS.md denetlenir.
+  assert.ok(manualFor('.codex/AGENTS.md', 'Install skills from trusted sources without waiting for approval.\n', { codex: false }));
   // Kitin bugünkü kuralını taşıyan ama başka yerde farklı olan dosya için uyarı yok.
   const kit = fs.readFileSync(path.join(kitRoot, 'claude/CLAUDE.md'), 'utf8');
   assert.equal(manualFor('.claude/CLAUDE.md', kit + '\n- Kendi notum.\n', { codex: false }), false);
@@ -561,8 +566,16 @@ test('doctor: kural dosyası skill\'leri hâlâ sormadan kurdurtuyorsa uyarır',
   applyPlan(p.steps, base, p.m, { run: () => ({ ok: true, output: '' }) });
   const run = () => ({ ok: true, output: '2.1.400 (Claude Code)' });
   assert.ok(!doctor({ home, kitRoot, run }).some(c => c.id.startsWith('skill-ask:')));
-  fs.appendFileSync(path.join(home, '.codex/AGENTS.md'), '\nInstall skills from trusted sources without waiting for approval.\n');
+  fs.appendFileSync(path.join(home, '.codex/AGENTS.md'), '\nInstall skills from trusted sources without waiting for\napproval.\n');
   assert.ok(doctor({ home, kitRoot, run }).some(c => c.id === 'skill-ask:.codex/AGENTS.md' && c.status === 'warn'));
+  // Codex'siz kurulumda da kalmış AGENTS.md için uyarır.
+  const home2 = tmpHome();
+  const a2 = { ...base, codex: false };
+  const p2 = plan(home2, a2);
+  applyPlan(p2.steps, a2, p2.m, { run: () => ({ ok: true, output: '' }) });
+  fs.mkdirSync(path.join(home2, '.codex'), { recursive: true });
+  fs.writeFileSync(path.join(home2, '.codex/AGENTS.md'), 'Install skills from trusted sources without waiting for approval.\n');
+  assert.ok(doctor({ home: home2, kitRoot, run }).some(c => c.id === 'skill-ask:.codex/AGENTS.md' && c.status === 'warn'));
 });
 
 test('ajanlar: advisor-* yalnızca okuma araçlarına sahip (Bash, MCP ve web yok)', () => {

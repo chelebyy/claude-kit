@@ -71,7 +71,8 @@ export function doctor({ home, kitRoot, run = runCommand, env = process.env }) {
     const legacy = allow.filter(x => LEGACY_SKILL_ALLOWS.includes(x));
     if (legacy.length) add('skill-allow', 'warn', `onaysız skill kurulumu izinleri duruyor (${legacy.join(', ')}); projedeki sahte bir npx/skills programı onaysız çalışabilir, kurulumu yeniden çalıştır`);
   }
-  for (const rel of ['.claude/CLAUDE.md', ...(a.codex ? ['.codex/AGENTS.md'] : [])]) {
+  // AGENTS.md, Codex seçilmemiş olsa da bakılır: eski kurulumdan kalan dosya Codex'te geçerlidir.
+  for (const rel of ['.claude/CLAUDE.md', '.codex/AGENTS.md']) {
     if (rulesInstallSkillsUnasked(readText(path.join(home, rel)))) add(`skill-ask:${rel}`, 'warn', `~/${rel} skill'leri hâlâ kullanıcıya sormadan kurdurtuyor; o cümleyi değiştir ya da kurulumu --on-conflict=replace ile yeniden çalıştır`);
   }
 

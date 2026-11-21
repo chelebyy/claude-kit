@@ -132,10 +132,11 @@ export function inspectMachine({ home, kitRoot, platform = process.platform, env
 }
 
 // Kural metni (eski kurulumdan kalan) bir skill'i kullanıcıya sormadan kurdurtuyor mu? Kit artık her
-// kurulumda sordurur; eski cümle "güvenilir kaynaktan onay beklemeden kur" idi.
+// kurulumda sordurur; eski cümle "güvenilir kaynaktan onay beklemeden kur" idi. Metin bütün olarak
+// aranır: Markdown'da satıra bölünmüş cümle de ("without waiting for\napproval") yakalanır.
 export function rulesInstallSkillsUnasked(text) {
   if (text == null) return false;
-  return text.split(/\r?\n/).some(l => /onay beklemeden kur|without waiting for approval/i.test(l));
+  return /onay\s+beklemeden\s+kur|without\s+waiting\s+for\s+approval/i.test(String(text));
 }
 
 // Kurulacak dosyaların listesi: [{ dest (mutlak), rel (ev dizinine göre), content, kind }]
@@ -176,6 +177,15 @@ export function buildPlan(a, m) {
     if (status === 'keep' && rulesInstallSkillsUnasked(cur)) {
       steps.push({ group: 'dosya', label: `~/${f.rel}`, status: 'manual',
         manual: 'korunan dosya skill\'leri hâlâ kullanıcıya sormadan kurdurtuyor; o cümleyi değiştir ya da kurulumu --on-conflict=replace ile çalıştır' });
+    }
+  }
+
+  // Codex seçilmediyse AGENTS.md kurulmaz, ama eski bir kurulumdan kalan dosya Codex'te hâlâ geçerlidir.
+  if (!a.codex) {
+    const rel = '.codex/AGENTS.md';
+    if (rulesInstallSkillsUnasked(readText(path.join(m.home, rel)))) {
+      steps.push({ group: 'dosya', label: `~/${rel}`, status: 'manual',
+        manual: 'Codex seçilmedi ama bu dosya skill\'leri hâlâ kullanıcıya sormadan kurdurtuyor; Codex kullanıyorsan o cümleyi değiştir, kullanmıyorsan dosyayı kaldır' });
     }
   }
 
