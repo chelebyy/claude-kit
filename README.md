@@ -65,6 +65,7 @@ Program makinende kit dışından olan hiçbir skill, plugin, hook ya da ayarı 
 - `config.toml` için tam bir TOML ayrıştırıcısı yok. Program dosyayı anlayamazsa `service_tier` satırını düzeltmez ve bunu sana bırakır.
 - `CLAUDE_CONFIG_DIR` ya da `CODEX_HOME` varsayılandan farklı bir dizini gösteriyorsa program kurmaz.
 - Hook komutuna yazılan Node ve ev dizini yolları kabukta genişleyen karakterler (`$`, ters tırnak, `%`, `!`, `"`) içeriyorsa program kurmaz.
+- Claude Code'un deneysel [Code Mode](https://code.claude.com/docs/en/code-mode)'unda model, araç çağrılarını JavaScript koduyla yapar ve komutu çalışırken (ör. bir dosyadan) üretebilir; auto mod sınıflandırıcısı yalnızca kodu görür. `model-guard` koddan yapılan `Bash`/`PowerShell` çağrılarını yine görür ve kit onu `"onFailure": "block"` ile kurar (hook çalışamazsa çağrı engellenir). Koddan başlatılan alt ajanların hook'tan geçip geçmediği belgede yazmaz. Güvenmediğin bir repoda Code Mode'u kapat: macOS/Linux/WSL'de `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=0 claude`, PowerShell'de `$env:CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "0"; claude` (o PowerShell penceresi kapanana kadar kapalı kalır). Ayrıntı: `claude/models/README.md` ("Engelin kapsamı").
 
 ## Codex ve Daybreak olmadan
 
