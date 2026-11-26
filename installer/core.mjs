@@ -22,10 +22,12 @@ export const FILES = [
   { src: 'claude/agents', dest: '.claude/agents', dir: true },
   { src: 'claude/skills/local-code-review', dest: '.claude/skills/local-code-review', dir: true },
   { src: 'claude/skills/local-security-review', dest: '.claude/skills/local-security-review', dir: true },
+  { src: 'claude/skills/postgres-schema', dest: '.claude/skills/postgres-schema', dir: true },
   { src: 'codex/AGENTS.md', dest: '.codex/AGENTS.md', kind: 'rules', when: 'codex' },
   { src: 'agents/skills/security-review-gate', dest: '.agents/skills/security-review-gate', dir: true, when: 'codex' },
   { src: 'agents/skills/codex-sentinel/references', dest: '.agents/skills/codex-sentinel/references', dir: true, when: 'codex' },
   { src: 'agents/skills/shared', dest: '.agents/skills/shared', dir: true, when: 'codex' },
+  { src: 'claude/skills/postgres-schema', dest: '.agents/skills/postgres-schema', dir: true, when: 'codex' },
 ];
 
 export const HOOKS = [
