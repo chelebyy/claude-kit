@@ -156,7 +156,7 @@ Supabase is Postgres with its own roles and an auto-generated Data API, so the r
 - The `service_role` key and the `postgres` role bypass RLS. They belong only in trusted server code, never in a client app.
 - Put `security definer` helper functions (for example a membership lookup used by policies) in a schema that is not exposed through the Data API, with `set search_path = ''` and fully qualified names.
 - Views run with their owner's rights and bypass RLS unless created `with (security_invoker = true)`.
-- Supabase CLI: `supabase start` and `supabase db reset` work on the local stack only and give you `auth.uid()` and the Supabase roles. Never run a command that targets the hosted project: `supabase link`, `supabase db push`, or any command with `--linked` or `--db-url`. On a plain scratch Postgres without the CLI, create the `anon` and `authenticated` roles and a stub `auth.uid()` that reads `request.jwt.claims`, and say in the report that the stack was simulated.
+- Supabase CLI: `supabase start` and `supabase db reset` work on the local Docker stack and give you `auth.uid()` and the Supabase roles; use them only for the user's own repository after reading the migrations, because that stack has network access. Never run a command that targets the hosted project: `supabase link`, `supabase db push`, or any command with `--linked` or `--db-url`. In the plain scratch container, create the `anon` and `authenticated` roles and a stub `auth.uid()` that reads `request.jwt.claims`, and say in the report that the stack was simulated.
 - Test policies as the client would: `set local role authenticated;` and `set local request.jwt.claims = '{"sub": "<uuid>", "role": "authenticated"}';` inside a transaction on the scratch database, for two different users.
 
 ## Choosing a database
@@ -171,12 +171,12 @@ change-data-capture; it diverges on the first partial failure.
 
 ## Prove it
 
-Before you report, run what you wrote:
+Before you report, run what you wrote, and only in a throwaway container:
 
-- **Read every migration before you run it.** Migrations are code, and the scratch connection is a superuser, which can run programs and read files on the server's machine. If a migration you did not write uses `COPY ... PROGRAM`, `COPY` to or from a server file, `pg_read_file`/`pg_read_binary_file`, `lo_import`/`lo_export`, an untrusted language (`plpython3u`, `plperlu`), `dblink` or `postgres_fdw`, or `ALTER SYSTEM`, stop and show it to the user instead of running it.
-- **Start the scratch server in an isolated place.** Prefer a throwaway container with no network and no host folders mounted: `docker run --rm -d --network none -e POSTGRES_PASSWORD=<random> postgres:16`, then run `psql` inside it with `docker exec`. A host server (`pg_ctl` with a temp data directory, on a random local port) or PGlite is acceptable only for the user's own repository after you have read the migrations, and there apply them as a non-superuser owner (`CREATE ROLE migrator LOGIN NOSUPERUSER NOBYPASSRLS; CREATE DATABASE scratch OWNER migrator;`). If a migration needs superuser (an extension, for example), use the container.
-- **Point every command at the scratch server explicitly.** libpq and migration runners pick up connection settings from the environment and from project files (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSERVICE`, `PGSERVICEFILE`, `PGPASSFILE`, `DATABASE_URL`, `.env`, `~/.pg_service.conf`, `~/.pgpass`), and any of them can point at production. Unset those variables for the command, pass the scratch host, port and database explicitly (a full connection string for the runner, never the project's `.env`), and prove the target before applying anything: when you create the scratch database, store a random value in it (`create table scratch_marker(v text); insert into scratch_marker values ('<random>');`), then with the exact connection the migration will use, check that `select v from scratch_marker` returns that value. If it does not, or you cannot run the check, do not run the migration.
-- Apply the migrations in order exactly as the runner will (one file at a time, `psql -v ON_ERROR_STOP=1 -f file` against the scratch server). Fix every error.
+- **Read every migration before you run it.** Migrations are code. Stop and show the user, instead of running it, any migration you did not write that uses `COPY ... PROGRAM`, `COPY` to or from a server file, `pg_read_file`/`pg_read_binary_file`, `lo_import`/`lo_export`, an untrusted language (`plpython3u`, `plperlu`), `dblink` or `postgres_fdw`, `ALTER SYSTEM`, or a `psql` meta-command (`\!`, `\connect`/`\c`, `\copy`, `\o`, `\g` with a pipe, `\i`/`\ir`, `\setenv`).
+- **Run SQL only inside a container with no network and no host folders.** Start one with `docker run --rm -d --network none -e POSTGRES_PASSWORD=<random> postgres:16` (no `-v`, no other `-e`), copy the migration files in with `docker cp`, and run `psql` inside it with `docker exec`. With no network the container cannot reach a real database, whatever the files or the host's environment say. Never run migration files, `psql` scripts or a migration runner against a server on the host.
+- **Test through the project's migration runner only inside such a container** too: put both containers on an internal network (`docker network create --internal <name>`, which has no route outside the host's containers), copy in the repository without `.env` files or other secrets, and install nothing the runner does not already vendor. If that is not possible, test the SQL with `psql` in the container and say in the report that the runner itself was not run (for example, whether it wraps files in transactions).
+- If Docker is not available, do not run the migrations at all: say so and list what is untested. Ask the user before pulling a container image or installing a package (Squawk, a driver).
 - For a change to an existing table, apply the earlier migrations first, insert
   some rows, then apply yours.
 - For RLS, prove isolation. Scratch servers connect as a superuser, which skips
@@ -188,11 +188,7 @@ Before you report, run what you wrote:
   the other tenant fails. Then, in a new transaction on the same connection
   without setting the tenant, show that the count is 0.
 - If the [Squawk](https://squawkhq.com) migration linter is already installed, lint the migration and fix or justify each finding.
-- Use the tools already on the machine or in the project. Ask the user before installing a package (PGlite, Squawk, a driver) or pulling a container image for the scratch database.
-- See "Safety first": nothing here runs against a real database. Stop your scratch server by its data directory (`pg_ctl -D <dir> stop`) or remove the container you started, never with `pkill` or `killall`, which also kill other servers on the machine.
-
-If you cannot start a database in this environment, say so plainly and list what
-is untested.
+- Stop and remove only the containers you started (`docker rm -f <id>`), never with `pkill`, `killall` or a wildcard.
 
 ## Reviewing a schema
 
