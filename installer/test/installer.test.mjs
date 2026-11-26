@@ -186,7 +186,8 @@ test('kurulum: boş ev klasörüne kurar, ikinci çalışmada hiçbir şey deği
   assert.deepEqual(calls, [], 'ev klasörü gerçek değilken komut çalışmamalı');
   assert.ok(results.every(r => r.result !== 'fail'), JSON.stringify(results.filter(r => r.result === 'fail')));
   for (const rel of ['.claude/CLAUDE.md', '.claude/hooks/model-guard.cjs', '.claude/agents/reviewer-high.md', '.codex/AGENTS.md',
-    '.agents/skills/security-review-gate/SKILL.md', '.claude/rules/claude-kit-profile.md', '.claude/claude-kit.json']) {
+    '.agents/skills/security-review-gate/SKILL.md', '.claude/skills/postgres-schema/SKILL.md', '.agents/skills/postgres-schema/SKILL.md',
+    '.claude/rules/claude-kit-profile.md', '.claude/claude-kit.json']) {
     assert.ok(fs.existsSync(path.join(home, rel)), rel);
   }
   assert.ok(!fs.readFileSync(path.join(home, '.claude/CLAUDE.md'), 'utf8').includes('{{'));
@@ -199,7 +200,7 @@ test('kurulum: boş ev klasörüne kurar, ikinci çalışmada hiçbir şey deği
 test('kurulum: Codex yoksa Codex dosyaları ve plugin\'i plana girmez', () => {
   const home = tmpHome();
   const { steps } = plan(home, { ...base, codex: false });
-  assert.ok(!steps.some(s => s.label.includes('.codex/') || s.label.includes('security-review-gate') || s.label.includes('codex@')));
+  assert.ok(!steps.some(s => s.label.includes('.codex/') || s.label.includes('.agents/') || s.label.includes('security-review-gate') || s.label.includes('codex@')));
 });
 
 test('kurulum: farklı CLAUDE.md keep ile korunur, replace ile yedeklenip değiştirilir', () => {

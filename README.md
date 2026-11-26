@@ -37,7 +37,7 @@ Hook'lar Node'un mutlak yoluyla kaydedilir. Node'u başka bir yere taşır ya da
   - `auto-plugins`: projeye göre, yalnızca makinende kurulu olan plugin ve skill'leri açar.
 - Model kaydı: `~/.claude/models/registry.json`.
 - Ajanlar: `reviewer-*` (teslim öncesi inceleme), `advisor-*` (Fable danışman), `worker-*`.
-- Skill'ler: `local-code-review`, `local-security-review`, `find-skills`.
+- Skill'ler: `local-code-review`, `local-security-review`, `postgres-schema` (PostgreSQL ve Supabase şema, migration ve RLS işleri), `find-skills`.
 - Plugin'ler: `commit-commands`, `claude-md-management`.
 
 **Codex varsa ayrıca:**
@@ -45,6 +45,7 @@ Hook'lar Node'un mutlak yoluyla kaydedilir. Node'u başka bir yere taşır ya da
 - `~/.codex/AGENTS.md`.
 - `codex@openai-codex` plugin'i.
 - `security-review-gate` skill'i ve okuduğu dosyalar.
+- `postgres-schema` skill'inin Codex kopyası (`~/.agents/skills/postgres-schema`).
 - `service_tier` denetimi (`~/.codex/config.toml`).
 
 **Sorulanlar:**
