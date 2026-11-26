@@ -84,7 +84,8 @@ When rows belong to a tenant (organization, workspace, shop, account):
     `BEGIN` it does nothing), never per session.
   - Views bypass RLS (they run as their owner) unless created `WITH
     (security_invoker = true)`.
-  - Scope uniqueness to the tenant (`UNIQUE (tenant_id, lower(email))`) unless the
+  - Scope uniqueness to the tenant (`CREATE UNIQUE INDEX ... ON t (tenant_id, lower(email))`;
+    a `UNIQUE` table constraint accepts columns, not expressions) unless the
     value is global, like a user's sign-in email.
   - Index the tenant key, usually as the first column of composite indexes.
 - Choose shared tables + RLS by default; schema- or database-per-tenant only for
@@ -107,19 +108,27 @@ long query, every other query on that table queues behind it.
   `gen_random_uuid()`, `clock_timestamp()`), an identity column or a stored
   generated column rewrites the table.
 - **Make an existing column NOT NULL**: `ADD CONSTRAINT c CHECK (col IS NOT NULL)
-  NOT VALID;` then `VALIDATE CONSTRAINT c;` then `ALTER COLUMN col SET NOT NULL;`
-  (PG 12+ uses the validated check and skips the scan), then drop the check.
-- **Add a CHECK or FOREIGN KEY** to an existing table: add it `NOT VALID`, then
-  `VALIDATE CONSTRAINT` in a separate statement. Validation does not block reads
-  or writes.
+  NOT VALID;` then, in a later transaction, `VALIDATE CONSTRAINT c;` then
+  `ALTER COLUMN col SET NOT NULL;` (PG 12+ uses the validated check and skips the
+  scan), then drop the check.
+- **Add a CHECK or FOREIGN KEY** to an existing table: add it `NOT VALID`, commit,
+  then `VALIDATE CONSTRAINT` in a separate transaction (a separate migration file
+  when the runner wraps each file in one transaction). The `ADD` takes a strong
+  lock that is held until its transaction commits, so validating in the same
+  transaction blocks reads and writes for the whole scan. Validation on its own
+  does not block reads or writes.
 - A composite FK with `ON DELETE SET NULL` must name the column
   (`SET NULL (project_id)`, PG 15+), or it nulls the tenant key too.
 - **Indexes**: `CREATE INDEX CONCURRENTLY` (and `DROP INDEX CONCURRENTLY`). It
-  cannot run inside a transaction block, so put it in its own migration file if
-  your runner wraps files in transactions. A failed concurrent build leaves an
-  `INVALID` index: drop it and retry.
+  cannot run inside a transaction block. A separate file is not enough when the
+  runner wraps every file in a transaction: use the runner's own opt-out for that
+  file (look it up in the runner's documentation) and test it through the runner,
+  not only with `psql -f`. A failed concurrent build leaves an `INVALID` index:
+  drop it and retry.
 - **Unique constraint**: `CREATE UNIQUE INDEX CONCURRENTLY`, then `ALTER TABLE
-  ... ADD CONSTRAINT ... UNIQUE USING INDEX ...`.
+  ... ADD CONSTRAINT ... UNIQUE USING INDEX ...`. This works only for a plain
+  column index; an expression index such as `lower(email)` stays a unique index
+  and cannot become a constraint.
 - **Rename or drop a column or table, or change a type**: never in one step
   while old code runs (rolling deploys, workers, cron). Use expand/contract:
   1. add the new column (or table);
@@ -164,10 +173,10 @@ change-data-capture; it diverges on the first partial failure.
 
 Before you report, run what you wrote:
 
-- Start a scratch Postgres (a local server, a throwaway `postgres:16` container,
-  `pg_ctl` with a temp data dir, or PGlite)
-  and apply the migrations in order exactly as the runner will (one file at a
-  time, `psql -v ON_ERROR_STOP=1 -f file`). Fix every error.
+- **Read every migration before you run it.** Migrations are code, and the scratch connection is a superuser, which can run programs and read files on the server's machine. If a migration you did not write uses `COPY ... PROGRAM`, `COPY` to or from a server file, `pg_read_file`/`pg_read_binary_file`, `lo_import`/`lo_export`, an untrusted language (`plpython3u`, `plperlu`), `dblink` or `postgres_fdw`, or `ALTER SYSTEM`, stop and show it to the user instead of running it.
+- **Start the scratch server in an isolated place.** Prefer a throwaway container with no network and no host folders mounted: `docker run --rm -d --network none -e POSTGRES_PASSWORD=<random> postgres:16`, then run `psql` inside it with `docker exec`. A host server (`pg_ctl` with a temp data directory, on a random local port) or PGlite is acceptable only for the user's own repository after you have read the migrations, and there apply them as a non-superuser owner (`CREATE ROLE migrator LOGIN NOSUPERUSER NOBYPASSRLS; CREATE DATABASE scratch OWNER migrator;`). If a migration needs superuser (an extension, for example), use the container.
+- **Point every command at the scratch server explicitly.** libpq and migration runners pick up connection settings from the environment and from project files (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSERVICE`, `PGSERVICEFILE`, `PGPASSFILE`, `DATABASE_URL`, `.env`, `~/.pg_service.conf`, `~/.pgpass`), and any of them can point at production. Unset those variables for the command, pass the scratch host, port and database explicitly (a full connection string for the runner, never the project's `.env`), and prove the target before applying anything: when you create the scratch database, store a random value in it (`create table scratch_marker(v text); insert into scratch_marker values ('<random>');`), then with the exact connection the migration will use, check that `select v from scratch_marker` returns that value. If it does not, or you cannot run the check, do not run the migration.
+- Apply the migrations in order exactly as the runner will (one file at a time, `psql -v ON_ERROR_STOP=1 -f file` against the scratch server). Fix every error.
 - For a change to an existing table, apply the earlier migrations first, insert
   some rows, then apply yours.
 - For RLS, prove isolation. Scratch servers connect as a superuser, which skips
