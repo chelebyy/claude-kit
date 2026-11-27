@@ -105,7 +105,9 @@ test('anahtarı açma: notlar deneme kimliğine (görev#deneme) ve sonuç klasö
     const k = JSON.parse(fs.readFileSync(key, 'utf8'));
     const grades = Object.fromEntries(Object.keys(k.items).map(item => [item, { claims: { c1: true, c2: k.items[item].run === 2 } }]));
     const out = blind.unblind(grades, k, { resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
-    assert.deepStrictEqual(out['r-a'], { 't1#1': { score: 1, max: 2 }, 't1#2': { score: 2, max: 2 } });
+    const strip = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { score: v.score, max: v.max }]));
+    assert.deepStrictEqual(strip(out['r-a']), { 't1#1': { score: 1, max: 2 }, 't1#2': { score: 2, max: 2 } });
+    assert.ok(Object.values(out['r-a']).every(v => /^[0-9a-f]{64}$/.test(v.sha256)));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -174,11 +176,13 @@ test('notları yazma: özette ölçülmemiş bir denemeye not yazılmaz, eksik n
   try {
     makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x'], ['t1', 2, 'y']]);
     makeResults(root, 'r-b', 'gpt-y', [['t1', 1, 'x']]);
-    const ok = { 'r-a': { 't1#1': { score: 1, max: 1 }, 't1#2': { score: 0, max: 1 } } };
-    assert.throws(() => blind.writeGrades({ ...ok, 'r-b': { 't1#9': { score: 1, max: 1 } } }, 'opus', root), /ölçülmüş bir deneme değil/);
+    const S = 'c'.repeat(64);
+    const ok = { 'r-a': { 't1#1': { score: 1, max: 1, sha256: 'x' }, 't1#2': { score: 0, max: 1, sha256: 'y' } } };
+    assert.throws(() => blind.writeGrades({ ...ok, 'r-b': { 't1#9': { score: 1, max: 1, sha256: 'z' } } }, 'opus', root, S), /ölçülmüş bir deneme değil/);
     assert.ok(!fs.existsSync(path.join(root, 'r-a', 'grades-opus.json')), 'yarım yazılmamalı');
-    assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1 } } }, 'opus', root), /için not yok/);
-    assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root).length, 1);
+    assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1, sha256: 'x' } } }, 'opus', root, S), /için not yok/);
+    assert.throws(() => blind.writeGrades(ok, 'opus', root), /secret/);
+    assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root, S).length, 1);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -224,5 +228,26 @@ test('paketleme: ".." ile başlayan bir dosya adı üst klasör sayılmaz; takma
     assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
     assert.ok(!fs.existsSync(path.join(out, '..identity.json')));
     assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'pkg2'), key: path.join(root, 'pkg2', '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// --- Son inceleme bulguları (2026-11-27, 3. tur) ---
+
+test('anahtar gizli bir değer taşır; açılan notlar cevap özetini taşır ve yazılan dosya imzalıdır', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    fs.mkdirSync(path.join(root, 'tasks', 't1'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', 't1', 'task.json'), JSON.stringify({ id: 't1', claims: ['c1'] }));
+    const key = path.join(root, 'key.json');
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
+    const k = JSON.parse(fs.readFileSync(key, 'utf8'));
+    assert.match(k.secret, /^[0-9a-f]{64}$/);
+    const g = Object.fromEntries(Object.keys(k.items).map(i => [i, { claims: { c1: true } }]));
+    const byDir = blind.unblind(g, k, { resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
+    assert.match(byDir['r-a']['t1#1'].sha256, /^[0-9a-f]{64}$/);
+    blind.writeGrades(byDir, 'opus', root, k.secret);
+    const stats = require('./stats.cjs');
+    assert.strictEqual(stats.readGrades(a, 'opus', { secret: k.secret, resultsRoot: root }).verified, true);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

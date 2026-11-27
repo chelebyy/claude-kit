@@ -212,7 +212,7 @@ test('onay: rubrik maddeleri (claims) olan görevlerde kör notlar zorunlu; yeni
   const a = frozenSummary('a', IDS, () => true), b = frozenSummary('gpt-base', IDS, () => true);
   assert.ok(approvalCheck(a, b, exp, OK).blockers.some(x => /kör not/.test(x)));
   const full = s => Object.fromEntries(s.tasks.map(r => [`${r.id}#${r.run}`, { score: 1, max: 1 }]));
-  assert.strictEqual(approvalCheck(a, b, exp, { ...OK, gradesA: full(a), gradesB: full(b) }).blockers.length, 0);
+  assert.strictEqual(approvalCheck(a, b, exp, { ...OK, gradesA: full(a), gradesB: full(b), gradesVerified: true }).blockers.length, 0);
   const re = frozenSummary('a', IDS, () => true);
   re.tasks[0].previousAttempts = [{ id: 't1', run: 1, pass: false }];
   assert.ok(approvalCheck(re, b, EXP, OK).blockers.some(x => /yeniden ölçülmüş/.test(x)));
@@ -222,4 +222,72 @@ test('onay çıktısı yeterlilik iddia etmez: elle doğrulanacak adımları lis
   const r = approvalCheck(frozenSummary('a', IDS, () => true), frozenSummary('gpt-base', IDS, () => true), EXP, OK);
   assert.strictEqual('passes' in r, false);
   assert.ok(Array.isArray(r.attest) && r.attest.length >= 3);
+});
+
+// --- Son inceleme bulguları (2026-11-27, 3. tur) ---
+const statsMod = require('./stats.cjs');
+const fsx = require('fs'), osx = require('os'), pathx = require('path');
+
+test('onay: kayıtlı kural ihlali (salt okunur, korunan dosya, bağlantı) puandan bağımsız engeldir', () => {
+  for (const v of [{ readOnlyOk: false }, { protectedOk: false }, { linksLeft: true }]) {
+    const a = frozenSummary('a', IDS, () => true);
+    Object.assign(a.tasks[0], v, { pass: false });
+    assert.ok(approvalCheck(a, frozenSummary('gpt-base', IDS, () => true), EXP, OK).blockers.some(x => /kural ihlali/.test(x)), JSON.stringify(v));
+  }
+});
+
+test('rol eşleşmesi: Claude rol metninde yalnızca rol adları sayılır, parantez içi ve bağlaçlar sayılmaz', () => {
+  assert.deepStrictEqual(statsMod.roleNames('main and reviewer (alias opus)'), ['main', 'reviewer']);
+  assert.deepStrictEqual(statsMod.roleNames('frontier'), ['frontier']);
+  const reg = { codex: {}, claude: { 'claude-x': { status: 'approved', role: 'main and reviewer (alias opus)' } } };
+  const a = { model: 'claude-y', effort: 'high' }, b = { model: 'claude-x', effort: 'high' };
+  assert.strictEqual(statsMod.baselineProblem(a, b, 'reviewer', reg), null);
+  for (const bad of ['alias', 'opus', 'and']) assert.match(statsMod.baselineProblem(a, b, bad, reg), /onaylı değil/);
+});
+
+test('onay: tekrar edilen zaman aşımları önceki denemelerdekileri de sayar', () => {
+  const a = frozenSummary('a', IDS, () => true);
+  a.tasks[0].previousAttempts = [{ pass: null, timeoutRetries: [{}] }];
+  a.tasks[1].timeoutRetries = [{}];
+  assert.strictEqual(approvalCheck(a, frozenSummary('gpt-base', IDS, () => true), EXP, OK).timeoutRetries.A, 2);
+});
+
+function gradedDir(root, name, secret, mutate) {
+  const dir = pathx.join(root, name);
+  fsx.mkdirSync(dir, { recursive: true });
+  fsx.writeFileSync(pathx.join(dir, 't1.md'), 'answer');
+  const sha = require('crypto').createHash('sha256').update(Buffer.from('answer')).digest('hex');
+  const grades = { 't1#1': { score: 1, max: 2, sha256: sha } };
+  const file = { version: 1, dir: name, label: 'opus', grades, mac: statsMod.gradesMac(secret, name, 'opus', grades) };
+  if (mutate) mutate(file, dir);
+  fsx.writeFileSync(pathx.join(dir, 'grades-opus.json'), JSON.stringify(file));
+  return dir;
+}
+
+test('kör notlar doğrulanır: anahtardaki gizli değerle imzalı ve cevabın içerik özetine bağlı olmalı', () => {
+  const root = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'model-eval-grades-'));
+  const secret = 'a'.repeat(64);
+  try {
+    const ok = gradedDir(root, 'r-ok', secret);
+    assert.deepStrictEqual(statsMod.readGrades(ok, 'opus', { secret, resultsRoot: root }).grades, { 't1#1': { score: 1, max: 2, sha256: require('crypto').createHash('sha256').update('answer').digest('hex') } });
+    assert.strictEqual(statsMod.readGrades(ok, 'opus', { secret, resultsRoot: root }).verified, true);
+    const forged = gradedDir(root, 'r-forged', secret, f => { f.grades['t1#1'].score = 2; });
+    assert.throws(() => statsMod.readGrades(forged, 'opus', { secret, resultsRoot: root }), /imza/);
+    const wrongKey = gradedDir(root, 'r-wrong', 'b'.repeat(64));
+    assert.throws(() => statsMod.readGrades(wrongKey, 'opus', { secret, resultsRoot: root }), /imza/);
+    const moved = gradedDir(root, 'r-moved', secret, f => { f.dir = 'r-other'; f.mac = statsMod.gradesMac(secret, 'r-other', 'opus', f.grades); });
+    assert.throws(() => statsMod.readGrades(moved, 'opus', { secret, resultsRoot: root }), /klasör/);
+    const stale = gradedDir(root, 'r-stale', secret, (f, dir) => { fsx.writeFileSync(pathx.join(dir, 't1.md'), 'changed later'); });
+    assert.throws(() => statsMod.readGrades(stale, 'opus', { secret, resultsRoot: root }), /cevap değişmiş/);
+    const unsigned = gradedDir(root, 'r-unsigned', secret);
+    assert.strictEqual(statsMod.readGrades(unsigned, 'opus', { resultsRoot: root }).verified, false);
+  } finally { fsx.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('onay: doğrulanmamış kör notlar engeldir', () => {
+  const exp = { ...EXP, t1: { split: 'frozen', version: 1, claims: true } };
+  const a = frozenSummary('a', IDS, () => true), b = frozenSummary('gpt-base', IDS, () => true);
+  const full = s => Object.fromEntries(s.tasks.map(r => [`${r.id}#${r.run}`, { score: 1, max: 1 }]));
+  const r = approvalCheck(a, b, exp, { ...OK, gradesA: full(a), gradesB: full(b), gradesVerified: false });
+  assert.ok(r.blockers.some(x => /doğrulanmadı/.test(x)), JSON.stringify(r.blockers));
 });

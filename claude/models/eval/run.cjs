@@ -685,6 +685,24 @@ function attemptsToRun(previous, tasks, repeats) {
   return out;
 }
 
+// Aynı sonuç klasöründe aynı anda tek çalıştırma: iki çalıştırma aynı eksik denemeleri hesaplayıp birbirinin
+// cevabını ve özetini ezebilirdi. Kilit dosyası wx ile oluşturulur; çalıştırma bitince (hata dahil) silinir.
+// Süreç öldürülürse kilit kalır: başka çalıştırma olmadığından emin olunca .lock elle silinir.
+function acquireLock(outDir) {
+  const f = path.join(outDir, '.lock');
+  try { fs.writeFileSync(f, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' }); } catch (e) {
+    if (e.code === 'EEXIST') throw new Error(`${path.basename(outDir)}: başka bir çalıştırma sürüyor ya da yarım kaldı (.lock); başka çalıştırma olmadığından eminsen .lock'u sil`);
+    throw e;
+  }
+  return () => fs.rmSync(f, { force: true });
+}
+
+// Sonuç kökündeki runs.jsonl: her çalıştırmanın başlangıç ve bitişi (yalnızca eklenir). Bir modelin bütün
+// ölçümleri buradan görülür; karar yazısında hepsi listelenir, yalnızca iyi çıkanı değil.
+function logRun(root, entry) {
+  fs.appendFileSync(path.join(root, 'runs.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+}
+
 function previousTaskVersions(outDir) {
   try { return JSON.parse(fs.readFileSync(path.join(outDir, 'summary.json'), 'utf8')).taskVersions || {}; } catch { return {}; }
 }
@@ -716,9 +734,17 @@ function summaryTotal(results, tasks, repeats = 1) {
 // aşımıyla gelse de deneme yinelenmez. Modelin süreyi aştığı denemede kontrol hiç çalıştırılmaz (checkNotRun).
 const isRuleViolation = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true ||
   r.checkTimedOut === true || Boolean(r.checkSkipped);
-function withTimeoutRetry(runOnce, beforeRetry) {
+// priorTimeouts: aynı denemenin daha önceki çalıştırmalarında (devam ettirilen ölçülmemiş deneme) kaç zaman
+// aşımı olduğu. Hak deneme başına birdir; devam ettirmek onu sıfırlamaz.
+function priorTimeouts(prev) {
+  if (!prev) return 0;
+  const one = r => (r.timedOut ? 1 : 0) + (Array.isArray(r.timeoutRetries) ? r.timeoutRetries.length : 0);
+  return one(prev) + (Array.isArray(prev.previousAttempts) ? prev.previousAttempts.reduce((s, p) => s + one(p), 0) : 0);
+}
+function withTimeoutRetry(runOnce, beforeRetry, prior = 0) {
   const first = runOnce();
   if (!first.timedOut || isRuleViolation(first)) return first;
+  if (prior >= 1) return { ...first, pass: false, timedOutTwice: true };
   const firstAttempt = { ...first, pass: null, timeoutUnmeasured: true };
   // İlk denemenin cevap ve tanı dosyaları yeniden denemenin üstüne yazmasın diye saklanır.
   if (beforeRetry) beforeRetry();
@@ -771,8 +797,15 @@ function main() {
     byTask: taskStats(results) });
   const todo = a.dryRun ? tasks.flatMap(t => Array.from({ length: a.repeats }, (_, k) => ({ task: t, run: k + 1 }))) : attemptsToRun(results, tasks, a.repeats);
   if (!a.dryRun && !todo.length) console.error('model-eval: bütün denemeler zaten ölçülmüş; yeniden ölçmek için sonuç klasörünü taşı');
-  {
-    for (const { task: t, run: k } of todo) {
+  const release = a.dryRun ? () => {} : acquireLock(outDir);
+  // Kilit alındıktan sonra özet yeniden okunur: kilitten önce okunan özet başka bir çalıştırmanın sonucunu
+  // kaçırmış olabilir.
+  if (!a.dryRun) results = previousResults(outDir, a, taskVersions);
+  const todoLocked = a.dryRun ? todo : attemptsToRun(results, tasks, a.repeats);
+  const runInfo = { dir: path.basename(outDir), model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, split: a.split || null, repeats: a.repeats, attempts: todoLocked.length };
+  if (!a.dryRun) logRun(path.dirname(outDir), { event: 'start', ...runInfo });
+  try {
+    for (const { task: t, run: k } of todoLocked) {
       const task = { ...t, run: k };
       // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.
       // --dry-run hiçbir şey yazmaz; gösterdiği komut çalıştırılabilsin diye olduğu gibi kalır.
@@ -782,11 +815,15 @@ function main() {
           if (fs.existsSync(f)) fs.renameSync(f, path.join(outDir, `${answerStem(task)}.timeout1${ext}`));
         }
       };
-      const r = a.dryRun ? evaluate(a, task, outDir) : withTimeoutRetry(() => evaluate(a, task, outDir), keepFirst);
+      const prev = results.find(x => x.id === t.id && (x.run || 1) === k);
+      const r = a.dryRun ? evaluate(a, task, outDir) : withTimeoutRetry(() => evaluate(a, task, outDir), keepFirst, priorTimeouts(prev));
       results = mergeResult(results, a.dryRun ? r : redactDeep(r));
       // Her denemeden sonra yaz: sonraki bir deneme çökerse harcanan kotanın sonucu kaybolmasın.
       if (!a.dryRun) fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summarize(), null, 2) + '\n');
     }
+    if (!a.dryRun) logRun(path.dirname(outDir), { event: 'end', ...runInfo, passed: results.filter(r => r.pass === true).length, notMeasured: results.filter(r => r.pass === null).length });
+  } finally {
+    release();
   }
   console.log(JSON.stringify(summarize(), null, 2));
 }
@@ -795,5 +832,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }

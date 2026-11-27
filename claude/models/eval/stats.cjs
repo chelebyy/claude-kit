@@ -12,6 +12,7 @@
 'use strict';
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const path = require('path');
 
 const runOf = r => (Number.isInteger(r.run) && r.run >= 1 ? r.run : 1);
@@ -122,10 +123,38 @@ function readSummary(dir) {
   if (!Array.isArray(s.tasks)) throw new Error(`${dir}: summary.json tasks alanı yok`);
   return s;
 }
-function readGrades(dir, label) {
+// Kör not dosyası (blind.cjs writeGrades): { version: 1, dir, label, grades: { "<görev>#<deneme>": { score, max, sha256 } }, mac }.
+// mac, anahtar dosyasındaki gizli değerle (pack üretir, Claude'un geçici klasöründe durur) alınan HMAC-SHA256'dır:
+// anahtarı olmayan biri not uyduramaz. sha256 notun ait olduğu cevap dosyasının özetidir: cevap sonradan
+// değiştiyse not geçersizdir.
+function gradesMac(secret, dir, label, grades) {
+  return crypto.createHmac('sha256', Buffer.from(String(secret), 'utf8')).update(JSON.stringify({ dir, label, grades })).digest('hex');
+}
+
+const answerName = k => { const [id, run] = k.split('#'); return Number(run) > 1 ? `${id}.run${run}.md` : `${id}.md`; };
+
+// { grades, verified }. secret verilmezse notlar okunur ama verified false'tur (yalnızca keşif).
+function readGrades(dir, label, { secret, resultsRoot = path.join(__dirname, 'results') } = {}) {
   if (!label) return undefined;
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(label)) throw new Error('--grades geçerli bir ad olmalı');
-  return JSON.parse(fs.readFileSync(path.join(dir, `grades-${label}.json`), 'utf8'));
+  const f = JSON.parse(fs.readFileSync(path.join(dir, `grades-${label}.json`), 'utf8'));
+  if (!f || f.version !== 1 || !f.grades || typeof f.grades !== 'object' || typeof f.mac !== 'string') {
+    if (secret) throw new Error(`${dir}: grades-${label}.json imzalı değil`);
+    return { grades: f, verified: false };
+  }
+  if (!secret) return { grades: f.grades, verified: false };
+  const rel = path.relative(fs.realpathSync(resultsRoot), fs.realpathSync(dir)).split(path.sep).join('/');
+  if (f.dir !== rel || f.label !== label) throw new Error(`${dir}: not dosyası başka bir klasöre ya da ada ait`);
+  const want = Buffer.from(gradesMac(secret, f.dir, f.label, f.grades), 'hex');
+  const got = Buffer.from(/^[0-9a-f]{64}$/.test(f.mac) ? f.mac : '', 'hex');
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) throw new Error(`${dir}: not dosyasının imzası tutmuyor`);
+  for (const [k, g] of Object.entries(f.grades)) {
+    const af = path.join(dir, answerName(k));
+    const st = fs.lstatSync(af, { throwIfNoEntry: false });
+    const sha = st && st.isFile() ? crypto.createHash('sha256').update(fs.readFileSync(af)).digest('hex') : null;
+    if (!g || g.sha256 !== sha) throw new Error(`${dir}: ${k} notlandıktan sonra cevap değişmiş`);
+  }
+  return { grades: f.grades, verified: true };
 }
 
 // İki özet ancak aynı bölüm, aynı tekrar sayısı ve karşılaştırılan her görevde aynı sürümle karşılaştırılır.
@@ -153,6 +182,7 @@ const ATTEST = Object.freeze([
   'kilitli görevler, rubrikler ve claims ilk ölçümden önce commit\'lendi',
   'puanlanmış cevaplardan bir örnek elle okundu',
   'timeoutRetries incelendi',
+  'runs.jsonl\'deki bu model ve eforla yapılmış bütün ölçümler sonuç yazısında listelendi (yalnızca seçilen değil)',
 ]);
 
 // Rol kararının sabit koşulları; komut satırından değiştirilemez.
@@ -181,6 +211,11 @@ function loadRegistry() {
   return JSON.parse(fs.readFileSync(path.join(os.userInfo().homedir, '.claude', 'models', 'registry.json'), 'utf8'));
 }
 
+// Kayıttaki rol metninden rol adları: parantez içi ("(alias opus)") atılır, virgül ve "and" ile ayrılır.
+function roleNames(s) {
+  return String(s).replace(/\([^)]*\)/g, ' ').split(/\s*(?:,|\band\b)\s*/).map(x => x.trim()).filter(Boolean);
+}
+
 // B, kayıtta verilen rolde onaylı mevcut model olmalı; A ondan farklı bir model olmalı. Codex modellerinde
 // B'nin eforu kayıttaki efforts listesinde olmalı. Claude rolleri serbest metindir ("main and reviewer (alias
 // opus)"): rol sözcüğü metnin sözcüklerinden biri olmalı.
@@ -192,7 +227,7 @@ function baselineProblem(a, b, role, registry) {
     const sec = registry[fam] || {};
     if (!Object.prototype.hasOwnProperty.call(sec, b.model)) continue;
     const e = sec[b.model];
-    const roleOk = typeof e.role === 'string' && (e.role === role || e.role.split(/[\s,()]+/).includes(role));
+    const roleOk = typeof e.role === 'string' && roleNames(e.role).includes(role);
     if (e.status !== 'approved' || !roleOk) return `B (${b.model}) kayıtta ${role} rolüyle onaylı değil`;
     if (fam === 'codex' && Array.isArray(e.efforts) && !e.efforts.includes(b.effort)) return `B eforu (${b.effort}) kayıttaki efforts listesinde değil`;
     return null;
@@ -209,6 +244,7 @@ function approvalCheck(a, b, expected, opts = {}) {
   if ((a.effort || null) !== (b.effort || null)) reasons.push(`eforlar farklı: A ${a.effort}, B ${b.effort}`);
   const needsGrades = Object.keys(expected).filter(id => expected[id].claims);
   if (needsGrades.length && (opts.gradesA === undefined || opts.gradesB === undefined)) reasons.push(`rubrik maddeli görevlerde kör not zorunlu (--grades): ${needsGrades.join(', ')}`);
+  else if (needsGrades.length && opts.gradesVerified !== true) reasons.push('kör notlar doğrulanmadı (--key ile imza ve cevap özeti denetlenmeli)');
   const ids = Object.keys(expected).sort();
   if (ids.length < MIN_TASKS) reasons.push(`kilitli sette ${ids.length} görev var (en az ${MIN_TASKS})`);
   for (const [side, s] of [['A', a], ['B', b]]) {
@@ -224,6 +260,7 @@ function approvalCheck(a, b, expected, opts = {}) {
       const want = Array.from({ length: APPROVAL.repeats }, (_, k) => k + 1).join(',');
       if (runs !== want) reasons.push(`${side}: ${id} denemeleri ${runs || 'yok'} (${want} olmalı)`);
       else if (got.some(r => r.pass !== true && r.pass !== false)) reasons.push(`${side}: ${id} ölçülmemiş deneme var`);
+      if (got.some(r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true)) reasons.push(`${side}: ${id} kural ihlali var (salt okunur, korunan dosya ya da bağlantı)`);
       if (got.some(r => (r.previousAttempts || []).some(p => p.pass === true || p.pass === false))) reasons.push(`${side}: ${id} yeniden ölçülmüş deneme var (ölçülmüş deneme değiştirilemez)`);
     }
     for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
@@ -231,17 +268,19 @@ function approvalCheck(a, b, expected, opts = {}) {
   const cmp = pairedCompare(a.tasks, b.tasks, { gradesA: opts.gradesA, gradesB: opts.gradesB, margin: APPROVAL.margin });
   if (cmp.excluded.length) reasons.push(`dışarıda kalan görevler: ${cmp.excluded.join(', ')}`);
   if (!cmp.ci || !(cmp.ci[0] > -APPROVAL.margin)) reasons.push(`aralığın alt ucu ${cmp.ci ? cmp.ci[0] : 'yok'} (-${APPROVAL.margin}'in üstünde olmalı)`);
-  const retries = s => s.tasks.filter(r => Array.isArray(r.timeoutRetries) && r.timeoutRetries.length).length;
+  const n = x => (Array.isArray(x.timeoutRetries) ? x.timeoutRetries.length : 0);
+  const retries = s => s.tasks.reduce((sum, r) => sum + n(r) + (r.previousAttempts || []).reduce((t, p) => t + n(p), 0), 0);
   return { blockers: [...new Set(reasons)], ci: cmp.ci, meanDiff: cmp.meanDiff, timeoutRetries: { A: retries(a), B: retries(b) }, attest: ATTEST };
 }
 
 function main(argv) {
   const dirs = [];
-  let label, margin, role;
+  let label, margin, role, keyFile;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--grades') label = argv[++i];
     else if (argv[i] === '--margin') margin = Number(argv[++i]);
     else if (argv[i] === '--role') role = argv[++i];
+    else if (argv[i] === '--key') keyFile = argv[++i];
     else dirs.push(argv[i]);
   }
   if (dirs.length === 1) return { model: readSummary(dirs[0]).model, byTask: taskStats(readSummary(dirs[0]).tasks) };
@@ -249,14 +288,17 @@ function main(argv) {
   if (path.resolve(dirs[0]) === path.resolve(dirs[1])) throw new Error('A ile B aynı klasör');
   const [a, b] = dirs.map(readSummary);
   compatibility(a, b);
-  const grades = { gradesA: readGrades(dirs[0], label), gradesB: readGrades(dirs[1], label) };
+  const secret = keyFile ? JSON.parse(fs.readFileSync(keyFile, 'utf8')).secret : undefined;
+  if (keyFile && !(typeof secret === 'string' && /^[0-9a-f]{64}$/.test(secret))) throw new Error('anahtar dosyasında secret yok');
+  const ga = readGrades(dirs[0], label, { secret }), gb = readGrades(dirs[1], label, { secret });
+  const grades = { gradesA: ga && ga.grades, gradesB: gb && gb.grades, gradesVerified: Boolean(ga && gb && ga.verified && gb.verified) };
   return { A: a.model, B: b.model, split: a.split || null,
-    ...pairedCompare(a.tasks, b.tasks, { ...grades, ...(margin !== undefined ? { margin } : {}) }),
+    ...pairedCompare(a.tasks, b.tasks, { gradesA: grades.gradesA, gradesB: grades.gradesB, ...(margin !== undefined ? { margin } : {}) }),
     approval: approvalCheck(a, b, frozenTasks(), { ...grades, role }) };
 }
 
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)), null, 2)); } catch (e) { console.error(`model-eval stats: ${e.message}`); process.exit(1); }
 } else {
-  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, baselineProblem, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
+  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, baselineProblem, roleNames, readGrades, gradesMac, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
 }

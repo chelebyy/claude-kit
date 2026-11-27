@@ -983,3 +983,44 @@ test('ölçülmüş denemeler değiştirilmez: yeniden çalıştırma yalnızca 
   // run alanı olmayan eski sonuç 1. denemedir.
   assert.deepStrictEqual(runModule.attemptsToRun([{ id: 'a', pass: true }], [{ id: 'a' }], 1), []);
 });
+
+// --- Son inceleme bulguları (2026-11-27, 3. tur) ---
+
+test('aynı sonuç klasöründe iki çalıştırma aynı anda olamaz: kilit', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    const release = runModule.acquireLock(outDir);
+    assert.throws(() => runModule.acquireLock(outDir), /başka bir çalıştırma/);
+    release();
+    const again = runModule.acquireLock(outDir);
+    again();
+    assert.ok(!fs.existsSync(path.join(outDir, '.lock')));
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('zaman aşımı hakkı devam ettirmede sıfırlanmaz: daha önce zaman aşımına düşmüş denemenin yeni zaman aşımı başarısızlıktır', () => {
+  const prev = { id: 't', run: 1, pass: null, timeoutRetries: [{ timedOut: true }], previousAttempts: [] };
+  assert.strictEqual(runModule.priorTimeouts(prev), 1);
+  assert.strictEqual(runModule.priorTimeouts({ id: 't', pass: null, timedOut: true, previousAttempts: [{ timeoutRetries: [{}] }] }), 2);
+  assert.strictEqual(runModule.priorTimeouts(undefined), 0);
+  let calls = 0;
+  const r = runModule.withTimeoutRetry(() => { calls++; return { id: 't', timedOut: true, pass: false }; }, null, 1);
+  assert.strictEqual(calls, 1);
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.timedOutTwice, true);
+});
+
+test('her çalıştırma sonuç kökündeki runs.jsonl kaydına eklenir (başlangıç ve bitiş)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-root-'));
+  try {
+    runModule.logRun(root, { event: 'start', dir: 'd1', model: 'm' });
+    runModule.logRun(root, { event: 'end', dir: 'd1', model: 'm' });
+    const lines = fs.readFileSync(path.join(root, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepStrictEqual(lines.map(l => l.event), ['start', 'end']);
+    assert.ok(lines.every(l => typeof l.at === 'string'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

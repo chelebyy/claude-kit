@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
-const { rng } = require('./stats.cjs');
+const { rng, gradesMac } = require('./stats.cjs');
 
 const ROOT = __dirname;
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -130,7 +130,8 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
     });
   }
   // claims yalnızca bilgi içindir; unblind maddeleri anahtardan değil görev tanımından okur.
-  fs.writeFileSync(key, JSON.stringify({ seed, items, claims }, null, 2) + '\n', { flag: 'wx' });
+  // secret: not dosyalarını imzalamak için (writeGrades); anahtarı olmayan biri not uyduramaz.
+  fs.writeFileSync(key, JSON.stringify({ seed, secret: crypto.randomBytes(32).toString('hex'), items, claims }, null, 2) + '\n', { flag: 'wx' });
   return { items: Object.keys(items).length, tasks: groups.size };
 }
 
@@ -207,13 +208,14 @@ function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksR
     const expected = taskClaims(tasksRoot, k.id);
     if (!expected || !expected.length) throw new Error(`${item}: ${k.id} görevinin task.json'unda claims listesi yok; kör notlar açılamaz`);
     if (expected.join('\n') !== names.join('\n')) throw new Error(`${item}: maddeler görevin rubrik maddeleriyle aynı değil`);
-    (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: names.filter(n => c[n]).length, max: names.length };
+    (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: names.filter(n => c[n]).length, max: names.length, sha256: k.sha256 };
   }
   return out;
 }
 
-function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results')) {
+function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results'), secret) {
   if (!SLUG_RE.test(label || '')) throw new Error('--label geçerli bir ad olmalı');
+  if (!(typeof secret === 'string' && /^[0-9a-f]{64}$/.test(secret))) throw new Error('anahtar dosyasında secret yok');
   const plan = [];
   for (const [rel, grades] of Object.entries(byDir)) {
     const dir = path.join(resultsRoot, rel);
@@ -225,9 +227,10 @@ function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results')) {
       .map(t => `${t.id}#${t.run === undefined ? 1 : t.run}`));
     for (const k of Object.keys(grades)) if (!measured.has(k)) throw new Error(`${rel}: ${k} özette ölçülmüş bir deneme değil`);
     for (const k of measured) if (!has(grades, k)) throw new Error(`${rel}: ${k} için not yok`);
+    for (const [k, g] of Object.entries(grades)) if (!g || typeof g.sha256 !== 'string') throw new Error(`${rel}: ${k} notunda cevap özeti yok`);
     const f = path.join(dir, `grades-${label}.json`);
     if (fs.existsSync(f)) throw new Error(`${rel}: grades-${label}.json zaten var`);
-    plan.push([f, grades]);
+    plan.push([f, { version: 1, dir: rel, label, grades, mac: gradesMac(secret, rel, label, grades) }]);
   }
   // Önce hepsi doğrulanır, sonra yazılır: yarım kalan bir açma bazı klasörlere not bırakmasın.
   for (const [f, grades] of plan) fs.writeFileSync(f, JSON.stringify(grades, null, 2) + '\n', { flag: 'wx' });
@@ -254,7 +257,8 @@ function main(argv) {
   if (cmd === 'unblind') {
     const key = opt(rest, '--key'), label = opt(rest, '--label');
     if (!key || !label || rest.length !== 1) throw new Error('kullanım: unblind <notlar.json> --key <anahtar.json> --label <ad>');
-    return { written: writeGrades(unblind(readJson(rest[0]), readJson(key)), label) };
+    const k = readJson(key);
+    return { written: writeGrades(unblind(readJson(rest[0]), k), label, undefined, k.secret) };
   }
   throw new Error('komut: pack | agree | unblind');
 }
