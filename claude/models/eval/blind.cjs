@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+// Kör puanlama araçları. Ağ, alt süreç ya da model çağrısı yok; yalnızca dosya okur ve yazar.
+// Kullanım:
+//   node claude/models/eval/blind.cjs pack --out <paket> --key <anahtar.json> --seed <n> <sonuç-klasörü>...
+//   node claude/models/eval/blind.cjs agree <notlar-1.json> <notlar-2.json>
+//   node claude/models/eval/blind.cjs unblind <notlar.json> --key <anahtar.json> --label <ad>
+// pack: her sonuç klasöründeki ölçülmüş denemelerin cevaplarını model adı silinmiş olarak <paket>/<görev>/<harf>.md
+// altına koyar; harfler görev başına tohumla karışır. Hangi harfin hangi model ve deneme olduğu yalnızca
+// anahtar dosyasındadır; anahtar paketin içine yazılamaz ve puanlayıcıya verilmez.
+// Not dosyası (puanlayıcının çıktısı): { "<görev>/<harf>": { "claims": { "<madde>": true|false, … } }, … }.
+// agree: aynı paketin iki bağımsız puanlamasının madde bazında uyumu (oran, Cohen kappa, ayrışan maddeler).
+// unblind: notları anahtarla açar ve her sonuç klasörüne grades-<ad>.json yazar (stats.cjs --grades <ad>).
+// Ayrıntılar: claude/models/README.md ("Kör puanlama").
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { rng } = require('./stats.cjs');
+
+const ROOT = __dirname;
+const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const ITEM_RE = /^([a-z0-9][a-z0-9._-]{0,63})\/([A-Z]{1,3})$/;
+
+// p, root'un içinde mi (bağlantılar çözüldükten sonra)?
+function inside(root, p) {
+  const r = path.relative(fs.realpathSync(root), fs.realpathSync(p));
+  return Boolean(r) && !r.startsWith('..') && !path.isAbsolute(r);
+}
+// Henüz var olmayan bir yolun, verilen klasörün içinde olup olmadığı (yazım düzeyinde).
+function under(dir, p) {
+  const r = path.relative(path.resolve(dir), path.resolve(p));
+  return !r || (!r.startsWith('..') && !path.isAbsolute(r));
+}
+
+function letter(i) {
+  let s = '';
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
+}
+
+function shuffle(xs, rand) {
+  const a = xs.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+const answerFile = (id, run) => (run > 1 ? `${id}.run${run}.md` : `${id}.md`);
+
+function redactModel(text, model) {
+  const esc = model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(esc, 'gi'), '[model]');
+}
+
+function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results') }) {
+  if (!Number.isInteger(seed)) throw new Error('--seed bir tam sayı olmalı');
+  if (under(out, key)) throw new Error('anahtar dosyası paket klasörünün içinde olamaz');
+  const groups = new Map();
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir) || !inside(resultsRoot, dir)) throw new Error(`${dir}: sonuç kökü (${resultsRoot}) içinde değil`);
+    const rel = path.relative(fs.realpathSync(resultsRoot), fs.realpathSync(dir)).split(path.sep).join('/');
+    const s = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8'));
+    if (typeof s.model !== 'string' || !SLUG_RE.test(s.model)) throw new Error(`${dir}: summary.json model alanı geçersiz`);
+    for (const t of Array.isArray(s.tasks) ? s.tasks : []) {
+      if (typeof t.id !== 'string' || !SLUG_RE.test(t.id)) throw new Error(`${dir}: geçersiz görev kimliği ${JSON.stringify(t.id)}`);
+      const run = t.run === undefined ? 1 : t.run;
+      if (!Number.isInteger(run) || run < 1) throw new Error(`${dir}: ${t.id} geçersiz deneme numarası`);
+      if (t.pass === null || t.pass === undefined) continue; // ölçülmedi: puanlanmaz
+      const f = path.join(dir, answerFile(t.id, run));
+      const st = fs.lstatSync(f, { throwIfNoEntry: false });
+      if (!st || !st.isFile()) throw new Error(`${rel}/${answerFile(t.id, run)}: cevap dosyası yok ya da normal dosya değil`);
+      const text = redactModel(fs.readFileSync(f, 'utf8'), s.model);
+      if (!groups.has(t.id)) groups.set(t.id, []);
+      groups.get(t.id).push({ dir: rel, id: t.id, run, model: s.model, effort: s.effort || null, text });
+    }
+  }
+  const ost = fs.lstatSync(out, { throwIfNoEntry: false });
+  if (ost && (!ost.isDirectory() || ost.isSymbolicLink() || fs.readdirSync(out).length)) throw new Error(`${out}: paket klasörü boş bir klasör olmalı`);
+  fs.mkdirSync(out, { recursive: true });
+  const rand = rng(seed);
+  const items = {};
+  for (const id of [...groups.keys()].sort()) {
+    fs.mkdirSync(path.join(out, id));
+    shuffle(groups.get(id), rand).forEach((e, i) => {
+      const L = letter(i);
+      fs.writeFileSync(path.join(out, id, `${L}.md`), e.text, { flag: 'wx' });
+      items[`${id}/${L}`] = { dir: e.dir, id: e.id, run: e.run, model: e.model, effort: e.effort };
+    });
+  }
+  fs.writeFileSync(key, JSON.stringify({ seed, items }, null, 2) + '\n', { flag: 'wx' });
+  return { items: Object.keys(items).length, tasks: groups.size };
+}
+
+function claimsOf(g, item) {
+  const c = g && g.claims;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error(`${item}: claims alanı yok`);
+  for (const [k, v] of Object.entries(c)) if (typeof v !== 'boolean') throw new Error(`${item}: ${k} true ya da false olmalı`);
+  return c;
+}
+
+// İki bağımsız puanlamanın madde bazında uyumu. Bir tarafta olmayan cevap ya da madde "missing"e
+// yazılır; uyum oranına girmez ama sessizce de düşmez.
+function agreement(g1, g2) {
+  const items = [...new Set([...Object.keys(g1), ...Object.keys(g2)])].sort();
+  const missing = [], disagreements = [];
+  let n = 0, agree = 0, aTrue = 0, bTrue = 0;
+  for (const item of items) {
+    if (!(item in g1) || !(item in g2)) { missing.push(item); continue; }
+    const c1 = claimsOf(g1[item], item), c2 = claimsOf(g2[item], item);
+    for (const claim of [...new Set([...Object.keys(c1), ...Object.keys(c2)])].sort()) {
+      if (!(claim in c1) || !(claim in c2)) { missing.push(`${item}:${claim}`); continue; }
+      n++;
+      if (c1[claim]) aTrue++;
+      if (c2[claim]) bTrue++;
+      if (c1[claim] === c2[claim]) agree++;
+      else disagreements.push({ item, claim, a: c1[claim], b: c2[claim] });
+    }
+  }
+  if (!n) return { claims: 0, agreementRate: null, kappa: null, disagreements, missing };
+  const po = agree / n;
+  const pa = aTrue / n, pb = bTrue / n;
+  const pe = pa * pb + (1 - pa) * (1 - pb);
+  const kappa = pe === 1 ? (po === 1 ? 1 : 0) : (po - pe) / (1 - pe);
+  return { claims: n, agreementRate: po, kappa, disagreements, missing };
+}
+
+// Notları anahtarla açar: { "<sonuç klasörü>": { "<görev>#<deneme>": { score, max } } }.
+function unblind(grades, key) {
+  const out = {};
+  for (const [item, g] of Object.entries(grades)) {
+    if (!ITEM_RE.test(item)) throw new Error(`${item}: geçersiz cevap adı`);
+    const k = key && key.items && Object.prototype.hasOwnProperty.call(key.items, item) ? key.items[item] : null;
+    if (!k) throw new Error(`${item}: anahtarda yok`);
+    const c = Object.values(claimsOf(g, item));
+    if (!c.length) throw new Error(`${item}: hiç madde yok`);
+    (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: c.filter(Boolean).length, max: c.length };
+  }
+  return out;
+}
+
+function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results')) {
+  if (!SLUG_RE.test(label || '')) throw new Error('--label geçerli bir ad olmalı');
+  const written = [];
+  for (const [rel, grades] of Object.entries(byDir)) {
+    const dir = path.join(resultsRoot, rel);
+    if (!fs.existsSync(dir) || !inside(resultsRoot, dir)) throw new Error(`${rel}: sonuç kökü içinde değil`);
+    const f = path.join(dir, `grades-${label}.json`);
+    fs.writeFileSync(f, JSON.stringify(grades, null, 2) + '\n', { flag: 'wx' });
+    written.push(f);
+  }
+  return written;
+}
+
+function opt(argv, name) {
+  const i = argv.indexOf(name);
+  if (i < 0) return undefined;
+  const v = argv[i + 1];
+  argv.splice(i, 2);
+  return v;
+}
+
+function main(argv) {
+  const [cmd, ...rest] = argv;
+  const readJson = f => JSON.parse(fs.readFileSync(f, 'utf8'));
+  if (cmd === 'pack') {
+    const out = opt(rest, '--out'), key = opt(rest, '--key'), seed = Number(opt(rest, '--seed'));
+    if (!out || !key || !rest.length) throw new Error('kullanım: pack --out <paket> --key <anahtar.json> --seed <n> <sonuç-klasörü>...');
+    return pack({ dirs: rest, out, key, seed });
+  }
+  if (cmd === 'agree' && rest.length === 2) return agreement(readJson(rest[0]), readJson(rest[1]));
+  if (cmd === 'unblind') {
+    const key = opt(rest, '--key'), label = opt(rest, '--label');
+    if (!key || !label || rest.length !== 1) throw new Error('kullanım: unblind <notlar.json> --key <anahtar.json> --label <ad>');
+    return { written: writeGrades(unblind(readJson(rest[0]), readJson(key)), label) };
+  }
+  throw new Error('komut: pack | agree | unblind');
+}
+
+if (require.main === module) {
+  try { console.log(JSON.stringify(main(process.argv.slice(2)), null, 2)); } catch (e) { console.error(`model-eval blind: ${e.message}`); process.exit(1); }
+} else {
+  module.exports = { pack, agreement, unblind, writeGrades, letter, main };
+}

@@ -1,0 +1,112 @@
+'use strict';
+// Çalıştırma: node --test claude/models/eval/blind.test.cjs
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const blind = require('./blind.cjs');
+
+function makeResults(root, name, model, answers) {
+  const dir = path.join(root, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const tasks = [];
+  for (const [id, run, text] of answers) {
+    fs.writeFileSync(path.join(dir, run > 1 ? `${id}.run${run}.md` : `${id}.md`), text);
+    tasks.push({ id, run, pass: true });
+  }
+  fs.writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({ model, effort: 'high', repeats: 2, tasks }));
+  return dir;
+}
+
+function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-blind-')); }
+
+test('paketleme: model adı cevaplardan silinir, harfler görev başına karışır, anahtar paketin dışında', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'As GPT-X I found a bug'], ['t1', 2, 'run two of gpt-x']]);
+    const b = makeResults(root, 'r-b', 'claude-y', [['t1', 1, 'claude-y here'], ['t1', 2, 'nothing']]);
+    const out = path.join(root, 'pkg');
+    const key = path.join(root, 'key.json');
+    blind.pack({ dirs: [a, b], out, key, seed: 5, resultsRoot: root });
+    const files = fs.readdirSync(path.join(out, 't1')).sort();
+    assert.deepStrictEqual(files, ['A.md', 'B.md', 'C.md', 'D.md']);
+    const all = files.map(f => fs.readFileSync(path.join(out, 't1', f), 'utf8')).join('\n');
+    assert.ok(!/gpt-x|claude-y/i.test(all), all);
+    assert.ok(!fs.readdirSync(out).includes('key.json'));
+    const k = JSON.parse(fs.readFileSync(key, 'utf8'));
+    assert.strictEqual(Object.keys(k.items).length, 4);
+    // Aynı tohum aynı karışım, farklı tohum (çoğunlukla) farklı.
+    const out2 = path.join(root, 'pkg2');
+    blind.pack({ dirs: [a, b], out: out2, key: path.join(root, 'key2.json'), seed: 5, resultsRoot: root });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(root, 'key2.json'), 'utf8')).items, k.items);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('paketleme: anahtar paket klasörünün içine yazılamaz, dolu bir paket klasörü reddedilir', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    const out = path.join(root, 'pkg');
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(out, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(out, 'x'), '1');
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(root, 'k.json'), seed: 1, resultsRoot: root }), /boş/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('paketleme: sonuç kökünün dışındaki klasör ve görev kimliği olmayan dosya adları kabul edilmez', () => {
+  const root = tmp();
+  const other = tmp();
+  try {
+    const a = makeResults(other, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root }), /sonuç kökü/);
+    const b = makeResults(root, 'r-b', 'gpt-x', []);
+    fs.writeFileSync(path.join(b, 'summary.json'), JSON.stringify({ model: 'gpt-x', tasks: [{ id: '../evil', run: 1 }] }));
+    assert.throws(() => blind.pack({ dirs: [b], out: path.join(root, 'p2'), key: path.join(root, 'k2.json'), seed: 1, resultsRoot: root }), /görev kimliği/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(other, { recursive: true, force: true }); }
+});
+
+test('ölçülmeyen denemeler pakete girmez', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    const s = JSON.parse(fs.readFileSync(path.join(a, 'summary.json'), 'utf8'));
+    s.tasks[1].pass = null;
+    fs.writeFileSync(path.join(a, 'summary.json'), JSON.stringify(s));
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root });
+    assert.deepStrictEqual(fs.readdirSync(path.join(root, 'p', 't1')), ['A.md']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('puanlayıcı uyumu: madde bazında oran ve kappa; ayrışan maddeler listelenir', () => {
+  const g1 = { 't1/A': { claims: { c1: true, c2: true, c3: false } }, 't1/B': { claims: { c1: false, c2: true, c3: false } } };
+  const g2 = { 't1/A': { claims: { c1: true, c2: false, c3: false } }, 't1/B': { claims: { c1: false, c2: true, c3: false } } };
+  const r = blind.agreement(g1, g2);
+  assert.strictEqual(r.claims, 6);
+  assert.strictEqual(r.agreementRate, 5 / 6);
+  assert.ok(r.kappa > 0 && r.kappa < 1);
+  assert.deepStrictEqual(r.disagreements, [{ item: 't1/A', claim: 'c2', a: true, b: false }]);
+});
+
+test('puanlayıcı uyumu: bir tarafta eksik madde ya da cevap uyumsuzluk olarak sayılır, sessizce düşmez', () => {
+  const r = blind.agreement({ 't1/A': { claims: { c1: true } } }, { 't1/A': { claims: {} }, 't1/B': { claims: { c1: true } } });
+  assert.deepStrictEqual(r.missing.sort(), ['t1/A:c1', 't1/B']);
+});
+
+test('anahtarı açma: notlar deneme kimliğine (görev#deneme) ve sonuç klasörüne döner', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    const key = path.join(root, 'key.json');
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 2, resultsRoot: root });
+    const k = JSON.parse(fs.readFileSync(key, 'utf8'));
+    const grades = Object.fromEntries(Object.keys(k.items).map(item => [item, { claims: { c1: true, c2: k.items[item].run === 2 } }]));
+    const out = blind.unblind(grades, k);
+    assert.deepStrictEqual(out['r-a'], { 't1#1': { score: 1, max: 2 }, 't1#2': { score: 2, max: 2 } });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('anahtarı açma: anahtarda olmayan bir harf reddedilir', () => {
+  assert.throws(() => blind.unblind({ 't1/Z': { claims: { c: true } } }, { items: {} }), /anahtarda yok/);
+});

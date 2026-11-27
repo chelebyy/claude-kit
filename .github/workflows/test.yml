@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Kurulum programı ve hook testleri
-        run: node --test installer/test/installer.test.mjs claude/hooks/auto-plugins.test.cjs claude/hooks/model-guard.test.cjs claude/hooks/model-watch.test.cjs
+        run: node --test installer/test/installer.test.mjs claude/hooks/auto-plugins.test.cjs claude/hooks/model-guard.test.cjs claude/hooks/model-watch.test.cjs claude/models/eval/stats.test.cjs claude/models/eval/blind.test.cjs
       # Değerlendirme çalıştırıcısı kontrolü Node izin modeliyle yalıtır ve ağ iznini (--allow-net)
       # tanıyan bir Node ister; eski sürümlerde kontrol "ölçülmedi" sayılır. Gerçek `codex sandbox`
       # isteyen üç test Codex CLI yoksa kendiliğinden atlanır.

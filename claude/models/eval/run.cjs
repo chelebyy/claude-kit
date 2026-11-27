@@ -2,7 +2,8 @@
 // Model değerlendirme çalıştırıcısı. Yalnızca yeni bir model geldiğinde elle çalıştırılır.
 // Kullanım:
 //   node claude/models/eval/run.cjs --model <slug> --effort <efor> --tier <fast|default>
-//     [--cyber-access-program <standard|daybreak_blue|daybreak_red>] [--task <id>] [--dry-run]
+//     [--cyber-access-program <standard|daybreak_blue|daybreak_red>] [--task <id>] [--split <dev|frozen>]
+//     [--repeats <1-10>] [--dry-run]
 // Her görev için: fixture geçici bir klasöre kopyalanır, Codex
 // `codex exec` ile çalıştırılır, ardından kontroller yapılır. Sonuç results/ altına yazılır.
 // Ayrıntılar: claude/models/README.md
@@ -12,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { taskStats } = require('./stats.cjs');
 
 const ROOT = __dirname;
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -22,6 +24,9 @@ const SANDBOXES = new Set(['read-only', 'workspace-write']);
 const CYBER_PROGRAMS = new Set(['standard', 'daybreak_blue', 'daybreak_red']);
 const IS_WIN = process.platform === 'win32';
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// Görev setinin bölümleri: dev (ayar ve deneme; ölçüm sonucuna göre değiştirilebilir) ve frozen (karar seti;
+// rubrik ve kontroller ilk ölçümden önce commit'lenir, sonra yalnızca yeni bir version ile değişir).
+const SPLITS = new Set(['dev', 'frozen']);
 
 function parseArgs(argv) {
   const a = { dryRun: false };
@@ -30,8 +35,14 @@ function parseArgs(argv) {
     if (k === '--dry-run') a.dryRun = true;
     else if (['--model', '--effort', '--tier', '--task'].includes(k)) a[k.slice(2)] = argv[++i];
     else if (k === '--cyber-access-program') a.cyber = argv[++i];
+    else if (k === '--split') a.split = argv[++i];
+    else if (k === '--repeats') a.repeats = argv[++i];
     else throw new Error(`bilinmeyen argüman: ${k}`);
   }
+  if (a.split !== undefined && !SPLITS.has(a.split)) throw new Error('--split: dev|frozen');
+  if (a.repeats === undefined) a.repeats = 1;
+  else if (!/^(10|[1-9])$/.test(a.repeats)) throw new Error('--repeats: 1-10 arası bir tam sayı');
+  else a.repeats = Number(a.repeats);
   if (!a.model || !SLUG_RE.test(a.model)) throw new Error('--model geçerli bir slug olmalı');
   // claude-* modelleri Claude Code CLI ile (claude -p) çalışır; katman ve cyber programı Codex'e özgüdür.
   a.provider = a.model.startsWith('claude-') ? 'claude' : 'codex';
@@ -97,7 +108,7 @@ function snapshot(root) {
   return out;
 }
 
-function loadTasks(only) {
+function loadTasks(only, split) {
   const dir = path.join(ROOT, 'tasks');
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter(e => e.isDirectory() && (!only || e.name === only))
@@ -106,8 +117,12 @@ function loadTasks(only) {
       const task = JSON.parse(fs.readFileSync(path.join(base, 'task.json'), 'utf8'));
       if (task.id !== e.name) throw new Error(`${e.name}: task.json id klasör adıyla aynı olmalı`);
       if (!SANDBOXES.has(task.sandbox)) throw new Error(`${e.name}: sandbox read-only ya da workspace-write olmalı`);
+      if (task.split !== undefined && !SPLITS.has(task.split)) throw new Error(`${e.name}: split dev ya da frozen olmalı`);
+      if (task.version !== undefined && !(Number.isInteger(task.version) && task.version >= 1)) throw new Error(`${e.name}: version pozitif bir tam sayı olmalı`);
       return { ...task, base, prompt: fs.readFileSync(path.join(base, 'prompt.md'), 'utf8') };
-    });
+    })
+    // split verilmemiş görevler eski settir (ön kontrol); --split verilince yalnızca o bölüm çalışır.
+    .filter(t => !split || t.split === split);
 }
 
 // Claude Code CLI (claude -p). Claude Code'un Windows'ta işletim sistemi sandbox'ı yoktur; bu yüzden
@@ -466,7 +481,7 @@ function evaluate(a, task, outDir) {
   try {
     result = evaluateIn(a, task, outDir, work, lastMsgFile, ctx);
   } catch (e) {
-    result = { id: task.id, error: String(e && e.message), pass: null };
+    result = { id: task.id, run: task.run || 1, error: String(e && e.message), pass: null };
   }
   // Zaman aşımından sonra codex'in alt süreci klasörü bir süre tutabilir (Windows'ta EBUSY).
   // rmSync bağlantıları izlemez: bağlantının kendisini siler, hedefini değil.
@@ -478,14 +493,18 @@ function evaluate(a, task, outDir) {
   return result;
 }
 
+// Deneme dosyalarının adı: 1. deneme <görev>.md (eski sonuçlarla aynı), sonrakiler <görev>.run<n>.md.
+const answerStem = task => (task.run > 1 ? `${task.id}.run${task.run}` : task.id);
+
 function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
+    const stem = answerStem(task);
     const fixture = path.join(task.base, 'fixture');
     const before = snapshot(fixture);
     fs.cpSync(fixture, work, { recursive: true });
 
     const isClaude = a.provider === 'claude';
     const args = isClaude ? claudeArgs(a, task) : codexArgs(a, task, work, lastMsgFile);
-    if (a.dryRun) return { id: task.id, dryRun: true, command: [isClaude ? 'claude' : 'codex', ...args].join(' ') };
+    if (a.dryRun) return { id: task.id, run: task.run || 1, dryRun: true, command: [isClaude ? 'claude' : 'codex', ...args].join(' ') };
 
     const cli = isClaude ? (testHooks.claudeCommand || claudeCommand)() : (testHooks.codexCommand || codexCommand)();
     const t0 = Date.now();
@@ -503,13 +522,13 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
     // Sonuçlar depoya kanıt olarak girer: yerel yollar (kullanıcı adı) yer tutucuyla değiştirilir.
     // Puanlama da kaydedilen metin üzerinden yapılır ki sonradan yeniden üretilebilsin.
     answer = redactLocalPaths(answer, work);
-    fs.writeFileSync(path.join(outDir, `${task.id}.md`), answer);
+    fs.writeFileSync(path.join(outDir, `${stem}.md`), answer);
     // codex exec hata verdiyse son çıktısı (stderr) teşhis için saklanır; yerel yollar ve token biçimli
     // değerler gizlenir. Başarılı bir tekrar, önceki denemeden kalan dosyayı siler (sonuç klasörü aynı gün
     // yeniden kullanılır).
     // Claude: süreç başarılı çıksa da JSON okunamadıysa ya da is_error varsa model çalışmamıştır.
     const codexFailed = Boolean(r.error) || r.status !== 0 || (isClaude && (!claudeOut || claudeOut.is_error === true));
-    const stderrFile = path.join(outDir, `${task.id}.stderr.txt`);
+    const stderrFile = path.join(outDir, `${stem}.stderr.txt`);
     // Claude hatayı stdout'taki JSON'da bildirir (örn. "API Error: overloaded"); JSON okunamadıysa stdout'un
     // sonu saklanır. Bu metin cevaba girmez, yalnızca tanı dosyasına yazılır.
     // Bazı hata türleri result metni yerine subtype ve errors alanlarıyla gelir; o zaman bunların özeti yazılır.
@@ -528,20 +547,22 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
         error: `work dir unreadable after the model run (${e.code || e.message})` };
     }
     const { model: changed, harness, links, after } = files;
+    // linksLeft: zaman aşımı tekrarı kararı için (bağlantı bırakan model kural ihlalidir).
     if (testHooks.afterSnapshot) testHooks.afterSnapshot(work); // yalnızca testler: geride kalan bir süreci taklit eder
-    const result = { id: task.id, kind: task.kind, exitStatus: r.status, durationMs, usage: isClaude ? claudeUsage(claudeOut) : lastUsage(r.stdout), changed, harnessFiles: harness };
+    const result = { id: task.id, run: task.run || 1, kind: task.kind, exitStatus: r.status, durationMs, usage: isClaude ? claudeUsage(claudeOut) : lastUsage(r.stdout), changed, harnessFiles: harness };
+    if (links.length) result.linksLeft = true;
     if (task.mustNotModify) result.readOnlyOk = changed.length === 0;
     if (task.protected) result.protectedOk = !task.protected.some(p => changed.includes(p));
     // Codex son mesaj yazmadan hata koduyla çıktıysa (API ya da oturum hatası) model değerlendirilemedi:
-    // sonuç "ölçülmedi"dir, görev yeniden çalıştırılır. Zaman aşımı bunun dışındadır (model süreyi aştı,
-    // başarısızlık); kural ihlali (salt okunur ya da korunan dosya, bırakılan bağlantı) varsa da sonuç
+    // sonuç "ölçülmedi"dir, görev yeniden çalıştırılır. Zaman aşımı burada başarısızlık olarak işaretlenir;
+    // ilk zaman aşımını "ölçülmedi" sayıp denemeyi bir kez yineleyen kural withTimeoutRetry'dadır. Kural ihlali (salt okunur ya da korunan dosya, bırakılan bağlantı) varsa da sonuç
     // başarısızlıktır.
     if (r.error && r.error.code === 'ETIMEDOUT') result.timedOut = true;
     else if (codexFailed && !answer.trim() && result.readOnlyOk !== false && result.protectedOk !== false && !links.length) {
       const how = r.error ? `failed (${r.error.code || r.error.message})` : `exited ${r.status}`;
       const cliName = isClaude ? 'claude -p' : 'codex exec';
       const claudeErr = isClaude && claudeOut && claudeOut.is_error ? ' (is_error)' : '';
-      result.environmentError = `${cliName} ${how}${claudeErr} without a final message; not a model result. See ${task.id}.stderr.txt and rerun.`;
+      result.environmentError = `${cliName} ${how}${claudeErr} without a final message; not a model result. See ${stem}.stderr.txt and rerun.`;
       result.pass = null;
       return result;
     }
@@ -630,8 +651,10 @@ function previousResults(outDir, a) {
 
 // Tekrar edilen görevin yeni sonucu eskisinin yerine geçer; eski deneme previousAttempts altında kalır,
 // diğer görevlerin sonuçları korunur (ör. "ölçülmedi" bir görev --task ile yeniden çalıştırıldığında).
+// Deneme kimliği görev + deneme numarasıdır; run alanı olmayan eski sonuçlar 1. deneme sayılır.
+const sameAttempt = (x, r) => x.id === r.id && (x.run || 1) === (r.run || 1);
 function mergeResult(results, r) {
-  const i = results.findIndex(x => x.id === r.id);
+  const i = results.findIndex(x => sameAttempt(x, r));
   if (i < 0) return [...results, r];
   const { previousAttempts = [], ...old } = results[i];
   return results.map((x, j) => (j === i ? { ...r, previousAttempts: [...previousAttempts, old] } : x));
@@ -639,8 +662,24 @@ function mergeResult(results, r) {
 
 // Özetin görev sayısı: kaydedilmiş ve bu çalıştırmada planlanan görevlerin birleşimi. Yarıda kalan bir
 // çalıştırmanın özeti tamamlanmış görünmesin (sonuç her görevden sonra yazılır).
-function summaryTotal(results, tasks) {
-  return new Set([...results.map(r => r.id), ...tasks.map(t => t.id)]).size;
+function summaryTotal(results, tasks, repeats = 1) {
+  const planned = tasks.flatMap(t => Array.from({ length: repeats }, (_, k) => `${t.id}#${k + 1}`));
+  return new Set([...results.map(r => `${r.id}#${r.run || 1}`), ...planned]).size;
+}
+
+// Zaman aşımı kuralı: bir denemenin ilk zaman aşımı "ölçülmedi"dir (API ya da sandbox takılması modelin
+// suçu değildir) ve deneme bir kez yeniden çalışır; aynı denemede ikinci zaman aşımı model başarısızlığıdır.
+// Zaman aşımıyla birlikte kural ihlali varsa (salt okunur, korunan dosya, bırakılan bağlantı) yeniden
+// çalıştırılmaz, başarısızlık kalır. Kontrol komutunun zaman aşımı (checkTimedOut: modelin kodu takıldı)
+// bu kurala girmez. İlk denemenin sonucu timeoutRetries altında kalır; cevap dosyası son denemenindir.
+const isRuleViolation = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true;
+function withTimeoutRetry(runOnce) {
+  const first = runOnce();
+  if (!first.timedOut || isRuleViolation(first)) return first;
+  const firstAttempt = { ...first, pass: null, timeoutUnmeasured: true };
+  const second = runOnce();
+  if (second.timedOut) return { ...second, pass: false, timedOutTwice: true, timeoutRetries: [firstAttempt] };
+  return { ...second, timeoutRetries: [firstAttempt] };
 }
 
 // Kayıtta onaylı security rolündeki model (örn. Daybreak) yalnızca güvenlik görevleriyle ve kayıttaki
@@ -668,7 +707,7 @@ function securityRoleProblem(a, tasks, registry) {
 
 function main() {
   const a = parseArgs(process.argv.slice(2));
-  const tasks = loadTasks(a.task);
+  const tasks = loadTasks(a.task, a.split);
   if (!tasks.length) throw new Error('görev bulunamadı');
   const roleIssue = securityRoleProblem(a, tasks, loadRegistry());
   if (roleIssue) throw new Error(roleIssue);
@@ -676,17 +715,23 @@ function main() {
   const outDir = path.join(ROOT, 'results', `${stamp}-${a.model}-${a.effort}${a.cyber ? `-${a.cyber}` : ''}`);
   if (!a.dryRun) fs.mkdirSync(outDir, { recursive: true });
   let results = a.dryRun ? [] : previousResults(outDir, a);
-  const summarize = () => ({ model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, date: stamp, tasks: results,
+  const taskVersions = Object.fromEntries(tasks.map(t => [t.id, { split: t.split || null, version: t.version || null }]));
+  const summarize = () => ({ model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, date: stamp,
+    repeats: a.repeats, split: a.split || null, taskVersions, tasks: results,
     passed: results.filter(r => r.pass === true).length,
     notMeasured: results.filter(r => r.pass === null).length,
-    total: summaryTotal(results, tasks) });
+    total: summaryTotal(results, tasks, a.repeats),
+    byTask: taskStats(results) });
   for (const t of tasks) {
-    // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.
-    // --dry-run hiçbir şey yazmaz; gösterdiği komut çalıştırılabilsin diye olduğu gibi kalır.
-    const r = evaluate(a, t, outDir);
-    results = mergeResult(results, a.dryRun ? r : redactDeep(r));
-    // Her görevden sonra yaz: sonraki bir görev çökerse harcanan kotanın sonucu kaybolmasın.
-    if (!a.dryRun) fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summarize(), null, 2) + '\n');
+    for (let k = 1; k <= a.repeats; k++) {
+      const task = { ...t, run: k };
+      // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.
+      // --dry-run hiçbir şey yazmaz; gösterdiği komut çalıştırılabilsin diye olduğu gibi kalır.
+      const r = a.dryRun ? evaluate(a, task, outDir) : withTimeoutRetry(() => evaluate(a, task, outDir));
+      results = mergeResult(results, a.dryRun ? r : redactDeep(r));
+      // Her denemeden sonra yaz: sonraki bir deneme çökerse harcanan kotanın sonucu kaybolmasın.
+      if (!a.dryRun) fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summarize(), null, 2) + '\n');
+    }
   }
   console.log(JSON.stringify(summarize(), null, 2));
 }
@@ -695,5 +740,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, summaryTotal, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }
