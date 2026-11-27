@@ -603,11 +603,12 @@ test('ajanlar: Explore kayıtta keşif için onaylı Haiku ile, yalnızca okuma 
   const text = fs.readFileSync(path.join(kitRoot, 'claude/agents/Explore.md'), 'utf8');
   const fm = text.split('---')[1];
   assert.match(fm, /^name: Explore$/m);
-  assert.match(fm, /^model: haiku$/m);
-  assert.match(fm, /^tools: Read, Grep, Glob, Bash$/m);
+  assert.match(fm, /^tools: Read, Grep, Glob$/m, 'kabuk yok: Bash ile yazma ve ağ yetkisi olurdu');
   assert.match(fm, /^omitClaudeMd: true$/m);
   const reg = JSON.parse(fs.readFileSync(path.join(kitRoot, 'claude/models/registry.json'), 'utf8'));
-  assert.ok(Object.entries(reg.claude).some(([k, e]) => k.includes('-haiku-') && e.status === 'approved'), 'haiku kayıtta onaylı olmalı');
+  const model = /^model: (\S+)$/m.exec(fm)[1];
+  const e = reg.claude[model];
+  assert.ok(e && e.status === 'approved' && /subagent/.test(e.role), `${model}: takma ad değil, kayıtta alt ajan rolüyle onaylı tam kimlik`);
 });
 
 test('codex config: metin ve yorum içindeki [ ve """ yapı sayılmaz; anlaşılmayan dosya düzeltilmez', () => {
