@@ -974,3 +974,12 @@ test('tek görevlik tekrarda önceki özetin sürüm bilgisi okunur', () => {
     fs.rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('ölçülmüş denemeler değiştirilmez: yeniden çalıştırma yalnızca eksik ya da ölçülmemiş denemeleri çalıştırır', () => {
+  const tasks = [{ id: 'a' }, { id: 'b' }];
+  const prev = [{ id: 'a', run: 1, pass: true }, { id: 'a', run: 2, pass: false }, { id: 'a', run: 3, pass: null }, { id: 'b', run: 1, pass: true }];
+  assert.deepStrictEqual(runModule.attemptsToRun(prev, tasks, 3).map(x => `${x.task.id}#${x.run}`), ['a#3', 'b#2', 'b#3']);
+  assert.deepStrictEqual(runModule.attemptsToRun([], [{ id: 'a' }], 2).map(x => x.run), [1, 2]);
+  // run alanı olmayan eski sonuç 1. denemedir.
+  assert.deepStrictEqual(runModule.attemptsToRun([{ id: 'a', pass: true }], [{ id: 'a' }], 1), []);
+});

@@ -674,6 +674,17 @@ function previousResults(outDir, a, taskVersions) {
   return Array.isArray(s.tasks) ? s.tasks : [];
 }
 
+// Ölçülmüş bir deneme (pass true ya da false) asla yeniden çalıştırılmaz ve değiştirilmez: denemeleri seçerek
+// yeniden ölçüp istenen sonucu bekleme yolu kapalıdır; eski notlar da o cevaplara ait kalır. Yeniden çalıştırma
+// yalnızca eksik ya da ölçülmemiş (pass null) denemeleri doldurur. Yeniden ölçmek için yeni bir sonuç klasörü
+// gerekir (klasörü taşı).
+function attemptsToRun(previous, tasks, repeats) {
+  const measured = new Set(previous.filter(r => r.pass === true || r.pass === false).map(r => `${r.id}#${r.run || 1}`));
+  const out = [];
+  for (const task of tasks) for (let run = 1; run <= repeats; run++) if (!measured.has(`${task.id}#${run}`)) out.push({ task, run });
+  return out;
+}
+
 function previousTaskVersions(outDir) {
   try { return JSON.parse(fs.readFileSync(path.join(outDir, 'summary.json'), 'utf8')).taskVersions || {}; } catch { return {}; }
 }
@@ -758,8 +769,10 @@ function main() {
     notMeasured: results.filter(r => r.pass === null).length,
     total: summaryTotal(results, tasks, a.repeats),
     byTask: taskStats(results) });
-  for (const t of tasks) {
-    for (let k = 1; k <= a.repeats; k++) {
+  const todo = a.dryRun ? tasks.flatMap(t => Array.from({ length: a.repeats }, (_, k) => ({ task: t, run: k + 1 }))) : attemptsToRun(results, tasks, a.repeats);
+  if (!a.dryRun && !todo.length) console.error('model-eval: bütün denemeler zaten ölçülmüş; yeniden ölçmek için sonuç klasörünü taşı');
+  {
+    for (const { task: t, run: k } of todo) {
       const task = { ...t, run: k };
       // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.
       // --dry-run hiçbir şey yazmaz; gösterdiği komut çalıştırılabilsin diye olduğu gibi kalır.
@@ -782,5 +795,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }

@@ -6,7 +6,7 @@
 // --grades <ad>: her klasördeki grades-<ad>.json (blind.cjs unblind --label <ad> çıktısı) puan olarak kullanılır;
 // verilmezse puan geçti = 1, kaldı = 0'dır. Verildiyse ölçülmüş her denemenin notu olmalıdır (eksik not hata).
 // --role <rol>: onay kontrolü için B'nin (mevcut model) kayıtta bu rolle onaylı olması gerekir; verilmezse
-// approval.passes false olur.
+// approval.blockers'a yazılır.
 // --margin <0-1>: yalnızca keşif için withinMargin payı (varsayılan 0.25). Rol kararına giren approval alanı bu
 // bayraktan etkilenmez: sabit pay 0.25, frozen bölüm, 3 tam tekrar ve depodaki kilitli görev seti (APPROVAL). Ayrıntılar: claude/models/README.md ("Tekrar ve istatistik").
 'use strict';
@@ -133,6 +133,7 @@ function compatibility(a, b) {
   const split = x => x.split || null, reps = x => (x.repeats === undefined ? 1 : x.repeats);
   if (split(a) !== split(b)) throw new Error(`bölümler farklı: ${split(a)} / ${split(b)}`);
   if (reps(a) !== reps(b)) throw new Error(`tekrar sayıları farklı: ${reps(a)} / ${reps(b)}`);
+  if ((a.effort || null) !== (b.effort || null)) throw new Error(`eforlar farklı: ${a.effort} / ${b.effort}`);
   const va = a.taskVersions || {}, vb = b.taskVersions || {};
   for (const s of [a, b]) {
     if (s.taskVersions) for (const r of s.tasks) if (!Object.prototype.hasOwnProperty.call(s.taskVersions, r.id)) throw new Error(`${s.model}: ${r.id} taskVersions'ta yok`);
@@ -145,6 +146,15 @@ function compatibility(a, b) {
   checkAttempts(b.tasks, reps(b), 'B');
 }
 
+// Makineyle denetlenmeyen, Claude'un sonuç yazısında doğrulayıp yazması gereken adımlar.
+const ATTEST = Object.freeze([
+  'puanlayıcı adayın ailesinden değil (Codex adayı: Claude; Claude adayı: frontier Codex modeli), körlemesine',
+  'aynı paket ikinci bağımsız puanlayıcıyla puanlandı ve blind.cjs agree uyumu yazıldı',
+  'kilitli görevler, rubrikler ve claims ilk ölçümden önce commit\'lendi',
+  'puanlanmış cevaplardan bir örnek elle okundu',
+  'timeoutRetries incelendi',
+]);
+
 // Rol kararının sabit koşulları; komut satırından değiştirilemez.
 const APPROVAL = Object.freeze({ split: 'frozen', repeats: 3, margin: 0.25 });
 
@@ -155,12 +165,14 @@ function frozenTasks(tasksRoot = path.join(__dirname, 'tasks')) {
     if (!e.isDirectory()) continue;
     let t;
     try { t = JSON.parse(fs.readFileSync(path.join(tasksRoot, e.name, 'task.json'), 'utf8')); } catch { continue; }
-    if (t.split === 'frozen') out[t.id] = { split: 'frozen', version: t.version || null };
+    if (t.split === 'frozen') out[t.id] = { split: 'frozen', version: t.version || null, claims: Array.isArray(t.claims) && t.claims.length > 0 };
   }
   return out;
 }
 
-// A (aday) rolü alabilir mi? Yalnızca şu kanıt sayılır: iki özet de frozen bölümde, tam 3 tekrarla, depodaki
+// A (aday) için rol kararının makineyle denetlenebilen ön koşulları. Çıktı "geçti" demez: blockers boşsa
+// bu ön koşullar sağlanmıştır, ama karar ayrıca attest altındaki elle doğrulanan adımlara bağlıdır.
+// Denetlenen kanıt: iki özet de frozen bölümde, tam 3 tekrarla, depodaki
 // kilitli görev setinin tamamıyla (aynı sürümler) çalışmış; her görevin 1..3 denemesinin hepsi ölçülmüş;
 // sabit 0.25 payla aralığın alt ucu -0.25'in üstünde. Eksik, yarım kalmış, başka bölümden ya da sürümden
 // gelen kanıt geçmez. timeoutRetries yalnızca bilgi içindir (bkz. README, bilinen sınır).
@@ -194,6 +206,9 @@ function approvalCheck(a, b, expected, opts = {}) {
   if (registry === undefined) { try { registry = loadRegistry(); } catch { registry = null; } }
   const bp = baselineProblem(a, b, opts.role, registry);
   if (bp) reasons.push(bp);
+  if ((a.effort || null) !== (b.effort || null)) reasons.push(`eforlar farklı: A ${a.effort}, B ${b.effort}`);
+  const needsGrades = Object.keys(expected).filter(id => expected[id].claims);
+  if (needsGrades.length && (opts.gradesA === undefined || opts.gradesB === undefined)) reasons.push(`rubrik maddeli görevlerde kör not zorunlu (--grades): ${needsGrades.join(', ')}`);
   const ids = Object.keys(expected).sort();
   if (ids.length < MIN_TASKS) reasons.push(`kilitli sette ${ids.length} görev var (en az ${MIN_TASKS})`);
   for (const [side, s] of [['A', a], ['B', b]]) {
@@ -209,6 +224,7 @@ function approvalCheck(a, b, expected, opts = {}) {
       const want = Array.from({ length: APPROVAL.repeats }, (_, k) => k + 1).join(',');
       if (runs !== want) reasons.push(`${side}: ${id} denemeleri ${runs || 'yok'} (${want} olmalı)`);
       else if (got.some(r => r.pass !== true && r.pass !== false)) reasons.push(`${side}: ${id} ölçülmemiş deneme var`);
+      if (got.some(r => (r.previousAttempts || []).some(p => p.pass === true || p.pass === false))) reasons.push(`${side}: ${id} yeniden ölçülmüş deneme var (ölçülmüş deneme değiştirilemez)`);
     }
     for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
   }
@@ -216,7 +232,7 @@ function approvalCheck(a, b, expected, opts = {}) {
   if (cmp.excluded.length) reasons.push(`dışarıda kalan görevler: ${cmp.excluded.join(', ')}`);
   if (!cmp.ci || !(cmp.ci[0] > -APPROVAL.margin)) reasons.push(`aralığın alt ucu ${cmp.ci ? cmp.ci[0] : 'yok'} (-${APPROVAL.margin}'in üstünde olmalı)`);
   const retries = s => s.tasks.filter(r => Array.isArray(r.timeoutRetries) && r.timeoutRetries.length).length;
-  return { passes: !reasons.length, reasons: [...new Set(reasons)], ci: cmp.ci, meanDiff: cmp.meanDiff, timeoutRetries: { A: retries(a), B: retries(b) } };
+  return { blockers: [...new Set(reasons)], ci: cmp.ci, meanDiff: cmp.meanDiff, timeoutRetries: { A: retries(a), B: retries(b) }, attest: ATTEST };
 }
 
 function main(argv) {

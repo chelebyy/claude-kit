@@ -143,44 +143,44 @@ const IDS = Object.keys(EXP);
 test('onay: kilitli setin tamamı, 3 tam tekrar ve eşit sonuç geçer', () => {
   const a = frozenSummary('a', IDS, () => true), b = frozenSummary('gpt-base', IDS, () => true);
   const r = approvalCheck(a, b, EXP, OK);
-  assert.strictEqual(r.passes, true, JSON.stringify(r.reasons));
+  assert.strictEqual(r.blockers.length, 0, JSON.stringify(r.blockers));
 });
 
 test('onay: yarım kalmış çalıştırma (eksik görev ya da eksik deneme) geçmez', () => {
   const b = frozenSummary('gpt-base', IDS, () => true);
   const partial = frozenSummary('a', IDS.slice(0, 3), () => true);
-  assert.strictEqual(approvalCheck(partial, b, EXP).passes, false);
+  assert.strictEqual(approvalCheck(partial, b, EXP).blockers.length > 0, true);
   const fewRuns = { ...frozenSummary('a', IDS, () => true) };
   fewRuns.tasks = fewRuns.tasks.filter(r => r.run === 1);
   const r = approvalCheck(fewRuns, b, EXP);
-  assert.strictEqual(r.passes, false);
-  assert.ok(r.reasons.some(x => /denemeleri/.test(x)), JSON.stringify(r.reasons));
+  assert.strictEqual(r.blockers.length > 0, true);
+  assert.ok(r.blockers.some(x => /denemeleri/.test(x)), JSON.stringify(r.blockers));
 });
 
 test('onay: ölçülmemiş deneme, dev bölümü, 1 tekrar ya da sürümsüz özet geçmez', () => {
   const b = frozenSummary('gpt-base', IDS, () => true);
-  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, (id, k) => (k === 2 ? null : true)), b, EXP).passes, false);
-  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { split: 'dev' }), b, EXP).passes, false);
-  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { repeats: 1 }), b, EXP).passes, false);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, (id, k) => (k === 2 ? null : true)), b, EXP).blockers.length > 0, true);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { split: 'dev' }), b, EXP).blockers.length > 0, true);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { repeats: 1 }), b, EXP).blockers.length > 0, true);
   const nov = frozenSummary('a', IDS, () => true); delete nov.taskVersions;
   const nov2 = frozenSummary('gpt-base', IDS, () => true); delete nov2.taskVersions;
-  assert.strictEqual(approvalCheck(nov, nov2, EXP).passes, false);
+  assert.strictEqual(approvalCheck(nov, nov2, EXP).blockers.length > 0, true);
 });
 
 test('onay: depodakinden farklı görev sürümü ya da sette olmayan görev geçmez', () => {
   const b = frozenSummary('gpt-base', IDS, () => true);
   const a = frozenSummary('a', IDS, () => true);
-  assert.strictEqual(approvalCheck(a, b, { ...EXP, t1: { split: 'frozen', version: 2 } }).passes, false);
+  assert.strictEqual(approvalCheck(a, b, { ...EXP, t1: { split: 'frozen', version: 2 } }).blockers.length > 0, true);
   const extra = frozenSummary('a', [...IDS, 't5'], () => true);
-  assert.strictEqual(approvalCheck(extra, b, EXP).passes, false);
+  assert.strictEqual(approvalCheck(extra, b, EXP).blockers.length > 0, true);
 });
 
 test('onay: pay sabittir; belirgin geride kalan aday geçmez (keşif payı ne olursa olsun)', () => {
   const b = frozenSummary('gpt-base', IDS, () => true);
   const a = frozenSummary('a', IDS, id => id === 't1' || id === 't2' ? false : true);
   const r = approvalCheck(a, b, EXP, { ...OK, margin: 1 });
-  assert.strictEqual(r.passes, false);
-  assert.ok(r.reasons.some(x => /alt ucu/.test(x)), JSON.stringify(r.reasons));
+  assert.strictEqual(r.blockers.length > 0, true);
+  assert.ok(r.blockers.some(x => /alt ucu/.test(x)), JSON.stringify(r.blockers));
 });
 
 test('onay: tekrar edilen zaman aşımları bilgi olarak sayılır', () => {
@@ -191,11 +191,35 @@ test('onay: tekrar edilen zaman aşımları bilgi olarak sayılır', () => {
 
 test('onay: mevcut model kayıtta o rolle onaylı olmalı; rol verilmemiş, aynı model ya da onaysız taban geçmez', () => {
   const a = frozenSummary('a', IDS, () => true), b = frozenSummary('gpt-base', IDS, () => true);
-  assert.strictEqual(approvalCheck(a, b, EXP, OK).passes, true);
-  assert.ok(approvalCheck(a, b, EXP, { registry: REG }).reasons.some(x => /rol verilmedi/.test(x)));
-  assert.ok(approvalCheck(b, b, EXP, OK).reasons.some(x => /aynı model/.test(x)));
-  assert.ok(approvalCheck(a, frozenSummary('weak', IDS, () => true), EXP, OK).reasons.some(x => /kayıtta yok/.test(x)));
-  assert.ok(approvalCheck(a, b, EXP, { role: 'fast', registry: REG }).reasons.some(x => /onaylı değil/.test(x)));
-  assert.ok(approvalCheck(a, { ...b, effort: 'low' }, EXP, OK).reasons.some(x => /efforts/.test(x)));
-  assert.ok(approvalCheck(a, b, EXP, { role: 'frontier', registry: null }).reasons.some(x => /okunamadı/.test(x)));
+  assert.strictEqual(approvalCheck(a, b, EXP, OK).blockers.length === 0, true);
+  assert.ok(approvalCheck(a, b, EXP, { registry: REG }).blockers.some(x => /rol verilmedi/.test(x)));
+  assert.ok(approvalCheck(b, b, EXP, OK).blockers.some(x => /aynı model/.test(x)));
+  assert.ok(approvalCheck(a, frozenSummary('weak', IDS, () => true), EXP, OK).blockers.some(x => /kayıtta yok/.test(x)));
+  assert.ok(approvalCheck(a, b, EXP, { role: 'fast', registry: REG }).blockers.some(x => /onaylı değil/.test(x)));
+  assert.ok(approvalCheck(a, { ...b, effort: 'low' }, EXP, OK).blockers.some(x => /efforts/.test(x)));
+  assert.ok(approvalCheck(a, b, EXP, { role: 'frontier', registry: null }).blockers.some(x => /okunamadı/.test(x)));
+});
+
+test('karşılaştırılabilirlik ve onay: A ile B aynı eforla ölçülmüş olmalı', () => {
+  const s = e => ({ model: 'm', effort: e, split: 'frozen', repeats: 3, taskVersions: { a: { split: 'frozen', version: 1 } }, tasks: runs('a', [true, true, true]) });
+  assert.throws(() => compatibility(s('high'), s('max')), /eforlar farklı/);
+  const a = frozenSummary('a', IDS, () => true, { effort: 'max' });
+  assert.ok(approvalCheck(a, frozenSummary('gpt-base', IDS, () => true), EXP, OK).blockers.some(x => /efor/.test(x)));
+});
+
+test('onay: rubrik maddeleri (claims) olan görevlerde kör notlar zorunlu; yeniden ölçülmüş deneme kanıt sayılmaz', () => {
+  const exp = { ...EXP, t1: { split: 'frozen', version: 1, claims: true } };
+  const a = frozenSummary('a', IDS, () => true), b = frozenSummary('gpt-base', IDS, () => true);
+  assert.ok(approvalCheck(a, b, exp, OK).blockers.some(x => /kör not/.test(x)));
+  const full = s => Object.fromEntries(s.tasks.map(r => [`${r.id}#${r.run}`, { score: 1, max: 1 }]));
+  assert.strictEqual(approvalCheck(a, b, exp, { ...OK, gradesA: full(a), gradesB: full(b) }).blockers.length, 0);
+  const re = frozenSummary('a', IDS, () => true);
+  re.tasks[0].previousAttempts = [{ id: 't1', run: 1, pass: false }];
+  assert.ok(approvalCheck(re, b, EXP, OK).blockers.some(x => /yeniden ölçülmüş/.test(x)));
+});
+
+test('onay çıktısı yeterlilik iddia etmez: elle doğrulanacak adımları listeler', () => {
+  const r = approvalCheck(frozenSummary('a', IDS, () => true), frozenSummary('gpt-base', IDS, () => true), EXP, OK);
+  assert.strictEqual('passes' in r, false);
+  assert.ok(Array.isArray(r.attest) && r.attest.length >= 3);
 });
