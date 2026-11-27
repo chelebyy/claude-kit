@@ -9,6 +9,9 @@ export const MIN_CLAUDE = '2.1.324';
 export const SKILLS_CLI = 'skills@1.9.0';
 export const PROFILE_PATH = '.claude/rules/claude-kit-profile.md';
 export const MANIFEST_PATH = '.claude/claude-kit.json';
+// Yerleşik danışman: takma ad (`fable`) yeni sürüme kendiliğinden geçerdi; kayıtta danışman rolüyle
+// onaylı tam kimlik yazılır. Yeni sürüm onaylanınca burası ve kayıt birlikte güncellenir (test denetler).
+export const ADVISOR_MODEL = 'claude-fable-5-2';
 
 // Kurulan dosyalar. `rules`: kullanıcının kendi hali olabilir, fark varsa sorulur.
 // Diğerleri kitin parçasıdır: fark varsa yedek alınıp güncellenir. `dir`: klasördeki her dosya.
@@ -99,7 +102,7 @@ export const QUESTIONS = [
   { key: 'autoEnv', flag: 'auto-env', type: 'choice', choices: ['mine', 'keep'], text: 'Auto mod ortam tanımı (autoMode.environment) eklensin mi?',
     help: 'mine: kit sahibinin yığın tanımı (TypeScript, Python, PHP, Vercel, Supabase...) eklenir, yalnızca makinede tanım yoksa. keep: dokunulmaz.',
     ask: (a, c) => a.autoMode && !c.hasAutoEnv, skip: 'keep', def: () => 'mine' },
-  { key: 'advisor', flag: 'advisor', type: 'bool', text: 'Yerleşik danışman Fable olsun mu (advisorModel = fable)?', def: () => true },
+  { key: 'advisor', flag: 'advisor', type: 'bool', text: `Yerleşik danışman Fable olsun mu (advisorModel = ${ADVISOR_MODEL})?`, def: () => true },
   { key: 'teams', flag: 'teams', type: 'bool', text: 'Takım modu (agent teams) açılsın mı?', def: () => true },
   { key: 'language', flag: 'language', type: 'text', text: 'Claude yanıt dili (ör. Turkish, English; "keep" = dokunma)', def: () => 'Turkish' },
   { key: 'uiPrefs', flag: 'ui-prefs', type: 'bool', text: 'Arayüz tercihleri uygulansın mı (tema auto, tam ekran TUI, latest güncelleme kanalı)?', def: () => true },
@@ -308,7 +311,7 @@ export function mergeSettings(current, a, ctx, prev) {
     s.pluginConfigs['agents-md@builtin'] = { options: { instructionFiles: 'claude-md-and-agents-md' } };
     notes.push('pluginConfigs: projelerdeki AGENTS.md de okunur');
   }
-  if (a.advisor && s.advisorModel !== 'fable') { s.advisorModel = 'fable'; notes.push('advisorModel = fable'); }
+  if (a.advisor && s.advisorModel !== ADVISOR_MODEL) { s.advisorModel = ADVISOR_MODEL; notes.push(`advisorModel = ${ADVISOR_MODEL}`); }
   if (a.teams) {
     s.env ||= {};
     if (s.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== '1') { s.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'; notes.push('takım modu açıldı'); }

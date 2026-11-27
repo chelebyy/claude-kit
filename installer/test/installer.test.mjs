@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   mergeSettings, inspectCodexTier, fixCodexTier, answersFromFlags, renderProfile,
-  hookCommand, FILES, compareVersions, parseAnswer, QUESTIONS,
+  hookCommand, FILES, compareVersions, parseAnswer, QUESTIONS, ADVISOR_MODEL,
 } from '../core.mjs';
 import { inspectMachine, buildPlan, applyPlan, resolveExe, runCommand, stableNodePath, rulesInstallSkillsUnasked } from '../system.mjs';
 
@@ -45,6 +45,7 @@ test('mergeSettings: makinedeki anahtarları korur ve iki kez çalışınca değ
   assert.equal(first.settings.hooks.Stop.length, 1);
   assert.equal(first.settings.language, 'Turkish');
   assert.equal(first.settings.permissions.defaultMode, 'auto');
+  assert.equal(first.settings.advisorModel, ADVISOR_MODEL, 'danışman takma adla değil, kayıttaki tam kimlikle yazılır');
   const second = mergeSettings(first.settings, a, ctx, { added: first.added });
   assert.deepEqual(second.notes, []);
   assert.deepEqual(second.settings, first.settings);
@@ -586,6 +587,28 @@ test('ajanlar: advisor-* yalnızca okuma araçlarına sahip (Bash, MCP ve web yo
     assert.match(fm, /^tools: Read, Grep, Glob$/m, n);
     assert.doesNotMatch(fm, /disallowedTools/, n);
   }
+});
+
+test('danışman: kurulumun yazdığı model kayıtta danışman rolüyle onaylı; eski "fable" takma adı güncellenir', () => {
+  const reg = JSON.parse(fs.readFileSync(path.join(kitRoot, 'claude/models/registry.json'), 'utf8'));
+  const e = reg.claude[ADVISOR_MODEL];
+  assert.ok(e && e.status === 'approved' && /^advisor\b/.test(e.role), ADVISOR_MODEL);
+  const { settings, notes } = mergeSettings({ advisorModel: 'fable' }, { ...base, advisor: true }, ctx, null);
+  assert.equal(settings.advisorModel, ADVISOR_MODEL);
+  assert.ok(notes.some(n => n.includes(ADVISOR_MODEL)));
+  assert.equal(mergeSettings({ advisorModel: 'fable' }, base, ctx, null).settings.advisorModel, 'fable', 'danışman sorusuna hayır denince makinedeki değere dokunulmaz');
+});
+
+test('ajanlar: Explore kayıtta keşif için onaylı Haiku ile, yalnızca okuma araçlarıyla çalışır', () => {
+  const text = fs.readFileSync(path.join(kitRoot, 'claude/agents/Explore.md'), 'utf8');
+  const fm = text.split('---')[1];
+  assert.match(fm, /^name: Explore$/m);
+  assert.match(fm, /^tools: Read, Grep, Glob$/m, 'kabuk yok: Bash ile yazma ve ağ yetkisi olurdu');
+  assert.match(fm, /^omitClaudeMd: true$/m);
+  const reg = JSON.parse(fs.readFileSync(path.join(kitRoot, 'claude/models/registry.json'), 'utf8'));
+  const model = /^model: (\S+)$/m.exec(fm)[1];
+  const e = reg.claude[model];
+  assert.ok(e && e.status === 'approved' && /subagent/.test(e.role), `${model}: takma ad değil, kayıtta alt ajan rolüyle onaylı tam kimlik`);
 });
 
 test('codex config: metin ve yorum içindeki [ ve """ yapı sayılmaz; anlaşılmayan dosya düzeltilmez', () => {
