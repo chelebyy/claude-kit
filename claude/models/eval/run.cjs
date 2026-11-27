@@ -798,13 +798,13 @@ function main() {
   const todo = a.dryRun ? tasks.flatMap(t => Array.from({ length: a.repeats }, (_, k) => ({ task: t, run: k + 1 }))) : attemptsToRun(results, tasks, a.repeats);
   if (!a.dryRun && !todo.length) console.error('model-eval: bütün denemeler zaten ölçülmüş; yeniden ölçmek için sonuç klasörünü taşı');
   const release = a.dryRun ? () => {} : acquireLock(outDir);
-  // Kilit alındıktan sonra özet yeniden okunur: kilitten önce okunan özet başka bir çalıştırmanın sonucunu
-  // kaçırmış olabilir.
-  if (!a.dryRun) results = previousResults(outDir, a, taskVersions);
-  const todoLocked = a.dryRun ? todo : attemptsToRun(results, tasks, a.repeats);
-  const runInfo = { dir: path.basename(outDir), model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, split: a.split || null, repeats: a.repeats, attempts: todoLocked.length };
-  if (!a.dryRun) logRun(path.dirname(outDir), { event: 'start', ...runInfo });
   try {
+    // Kilit alındıktan sonra özet yeniden okunur: kilitten önce okunan özet başka bir çalıştırmanın sonucunu
+    // kaçırmış olabilir. Buradan sonraki her adım try içindedir: hata verse de kilit bırakılır.
+    if (!a.dryRun) results = previousResults(outDir, a, taskVersions);
+    const todoLocked = a.dryRun ? todo : attemptsToRun(results, tasks, a.repeats);
+    const runInfo = { dir: path.basename(outDir), model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, split: a.split || null, repeats: a.repeats, attempts: todoLocked.length };
+    if (!a.dryRun) logRun(path.dirname(outDir), { event: 'start', ...runInfo });
     for (const { task: t, run: k } of todoLocked) {
       const task = { ...t, run: k };
       // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.

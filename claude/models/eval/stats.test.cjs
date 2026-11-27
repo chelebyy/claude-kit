@@ -291,3 +291,15 @@ test('onay: doğrulanmamış kör notlar engeldir', () => {
   const r = approvalCheck(a, b, exp, { ...OK, gradesA: full(a), gradesB: full(b), gradesVerified: false });
   assert.ok(r.blockers.some(x => /doğrulanmadı/.test(x)), JSON.stringify(r.blockers));
 });
+
+test('kesin başarısızlıklar (kontrol zaman aşımı, kontrol klasörü denetimi, iki zaman aşımı, kural ihlali) kör notla düzeltilemez: puan 0', () => {
+  for (const v of [{ checkTimedOut: true }, { checkSkipped: 'x' }, { timedOutTwice: true }, { readOnlyOk: false }, { protectedOk: false }, { linksLeft: true }]) {
+    assert.strictEqual(scoreOf({ id: 'a', run: 1, pass: false, ...v }, { 'a#1': { score: 1, max: 1 } }), 0, JSON.stringify(v));
+  }
+});
+
+test('onay: kontrol klasörü denetimine takılan deneme kural ihlali gibi engeldir', () => {
+  const a = frozenSummary('a', IDS, () => true);
+  Object.assign(a.tasks[0], { pass: false, checkSkipped: 'work dir changed after the model run: x' });
+  assert.ok(approvalCheck(a, frozenSummary('gpt-base', IDS, () => true), EXP, OK).blockers.some(x => /kural ihlali|denetim/.test(x)));
+});

@@ -1024,3 +1024,10 @@ test('her çalıştırma sonuç kökündeki runs.jsonl kaydına eklenir (başlan
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('kilit alındıktan sonraki her adım hata verse de kilit bırakılır', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'run.cjs'), 'utf8');
+  const body = src.slice(src.indexOf('const release = a.dryRun'), src.indexOf('  } finally {\n    release();'));
+  // acquireLock'tan sonra try'a kadar yalnızca try açılışı olmalı: arada atabilen bir adım kalmamalı.
+  assert.match(body, /^const release = a\.dryRun \? \(\) => \{\} : acquireLock\(outDir\);\n  try \{/);
+});

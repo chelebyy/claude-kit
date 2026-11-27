@@ -37,8 +37,13 @@ function taskStats(results) {
 // Bir denemenin 0–1 arası puanı. Ölçülmemiş deneme puansızdır (null), not olsa bile.
 // grades verildiyse (kör puanlama) her ölçülmüş denemenin notu olmalıdır: eksik not sessizce geçti/kaldı
 // puanına düşseydi, notları seçerek eksik bırakmak sonucu değiştirebilirdi.
+// Çalıştırıcının kesin başarısızlıkları: kör not bunları düzeltemez (puan 0).
+const hardFail = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true ||
+  r.checkTimedOut === true || Boolean(r.checkSkipped) || r.timedOutTwice === true;
+
 function scoreOf(r, grades) {
   if (r.pass === null || r.pass === undefined) return null;
+  if (hardFail(r)) return 0;
   if (grades === undefined) return r.pass === true ? 1 : 0;
   const k = `${r.id}#${runOf(r)}`;
   const g = Object.prototype.hasOwnProperty.call(grades, k) ? grades[k] : undefined;
@@ -260,7 +265,7 @@ function approvalCheck(a, b, expected, opts = {}) {
       const want = Array.from({ length: APPROVAL.repeats }, (_, k) => k + 1).join(',');
       if (runs !== want) reasons.push(`${side}: ${id} denemeleri ${runs || 'yok'} (${want} olmalı)`);
       else if (got.some(r => r.pass !== true && r.pass !== false)) reasons.push(`${side}: ${id} ölçülmemiş deneme var`);
-      if (got.some(r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true)) reasons.push(`${side}: ${id} kural ihlali var (salt okunur, korunan dosya ya da bağlantı)`);
+      if (got.some(r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true || Boolean(r.checkSkipped))) reasons.push(`${side}: ${id} kural ihlali ya da kontrol klasörü denetimi başarısız (salt okunur, korunan dosya, bağlantı, checkSkipped)`);
       if (got.some(r => (r.previousAttempts || []).some(p => p.pass === true || p.pass === false))) reasons.push(`${side}: ${id} yeniden ölçülmüş deneme var (ölçülmüş deneme değiştirilemez)`);
     }
     for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
