@@ -658,6 +658,11 @@ function previousResults(outDir, a, taskVersions) {
   if (old.repeats !== (a.repeats || 1) || old.split !== (a.split || null)) {
     throw new Error(`${path.basename(outDir)}/summary.json başka bir çalıştırmaya ait (tekrar sayısı ya da bölüm farklı); klasörü taşıyıp yeniden çalıştır`);
   }
+  // Sürüm bilgisi olmayan (v2 öncesi) bir özete sürümlü ya da bölümlü görevler eklenmez.
+  if (taskVersions && !s.taskVersions && Array.isArray(s.tasks) && s.tasks.length &&
+      Object.values(taskVersions).some(v => v.version !== null || v.split !== null)) {
+    throw new Error(`${path.basename(outDir)}/summary.json sürüm bilgisi olmayan eski bir çalıştırmaya ait; klasörü taşıyıp yeniden çalıştır`);
+  }
   if (taskVersions && s.taskVersions) {
     for (const [id, v] of Object.entries(taskVersions)) {
       const o = s.taskVersions[id];
@@ -667,6 +672,10 @@ function previousResults(outDir, a, taskVersions) {
     }
   }
   return Array.isArray(s.tasks) ? s.tasks : [];
+}
+
+function previousTaskVersions(outDir) {
+  try { return JSON.parse(fs.readFileSync(path.join(outDir, 'summary.json'), 'utf8')).taskVersions || {}; } catch { return {}; }
 }
 
 // Tekrar edilen görevin yeni sonucu eskisinin yerine geçer; eski deneme previousAttempts altında kalır,
@@ -741,6 +750,8 @@ function main() {
   if (!a.dryRun) fs.mkdirSync(outDir, { recursive: true });
   const taskVersions = Object.fromEntries(tasks.map(t => [t.id, { split: t.split || null, version: t.version || null }]));
   let results = a.dryRun ? [] : previousResults(outDir, a, taskVersions);
+  // Tek görevlik tekrar (--task) öteki görevlerin sonuçlarını korur; onların sürüm bilgisi de korunur.
+  if (!a.dryRun) Object.assign(taskVersions, { ...previousTaskVersions(outDir), ...taskVersions });
   const summarize = () => ({ model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, date: stamp,
     repeats: a.repeats, split: a.split || null, taskVersions, tasks: results,
     passed: results.filter(r => r.pass === true).length,
@@ -771,5 +782,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }

@@ -102,13 +102,13 @@ test('anahtarı açma: notlar deneme kimliğine (görev#deneme) ve sonuç klasö
     blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 2, resultsRoot: root });
     const k = JSON.parse(fs.readFileSync(key, 'utf8'));
     const grades = Object.fromEntries(Object.keys(k.items).map(item => [item, { claims: { c1: true, c2: k.items[item].run === 2 } }]));
-    const out = blind.unblind(grades, k);
+    const out = blind.unblind(grades, k, { resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     assert.deepStrictEqual(out['r-a'], { 't1#1': { score: 1, max: 2 }, 't1#2': { score: 2, max: 2 } });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('anahtarı açma: anahtarda olmayan bir harf reddedilir', () => {
-  assert.throws(() => blind.unblind({ 't1/Z': { claims: { c: true } } }, { items: {} }), /anahtarda yok/);
+  assert.throws(() => blind.unblind({ 't1/Z': { claims: { c: true } } }, { items: {} }, { resultsRoot: os.tmpdir() }), /anahtarda yok/);
 });
 
 // --- İnceleme düzeltmeleri (2026-11-27) ---
@@ -126,6 +126,7 @@ test('paketleme: paket klasörüne takma ad (bağlantı) üzerinden verilen anah
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+const roots = root => ({ resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
 function packed(root, answers, claims) {
   const tasksRoot = path.join(root, 'tasks');
   if (claims) { fs.mkdirSync(path.join(tasksRoot, 't1'), { recursive: true }); fs.writeFileSync(path.join(tasksRoot, 't1', 'task.json'), JSON.stringify({ id: 't1', claims })); }
@@ -141,11 +142,13 @@ test('anahtarı açma: eksik bırakılan cevap, rubrikte olmayan madde ve tutars
     const k = packed(root, [['t1', 1, 'x'], ['t1', 2, 'y']], ['c1', 'c2']);
     const items = Object.keys(k.items);
     const full = Object.fromEntries(items.map(i => [i, { claims: { c1: true, c2: false } }]));
-    assert.doesNotThrow(() => blind.unblind(full, k));
-    assert.throws(() => blind.unblind({ [items[0]]: full[items[0]] }, k), /not eksik/);
-    assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, k), /rubrik/);
-    const k2 = { ...k, claims: {} };
-    assert.throws(() => blind.unblind({ ...full, [items[1]]: { claims: { c1: true } } }, k2), /öteki cevaplarıyla/);
+    assert.doesNotThrow(() => blind.unblind(full, k, roots(root)));
+    assert.throws(() => blind.unblind({ [items[0]]: full[items[0]] }, k, roots(root)), /not eksik/);
+    assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, k, roots(root)), /rubrik/);
+    // Anahtardaki madde listesi kullanılmaz: depodaki task.json'dakiler geçerlidir.
+    assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, { ...k, claims: { t1: ['invented'] } }, roots(root)), /rubrik/);
+    fs.rmSync(path.join(root, 'tasks'), { recursive: true });
+    assert.throws(() => blind.unblind({ ...full, [items[1]]: { claims: { c1: true } } }, k, roots(root)), /öteki cevaplarıyla/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -156,9 +159,9 @@ test('anahtarı açma: başka klasöre, başka göreve yönlendiren ya da aynı 
     const items = Object.keys(k.items);
     const g = Object.fromEntries(items.map(i => [i, { claims: { c1: true } }]));
     const mut = (i, v) => ({ ...k, items: { ...k.items, [items[i]]: { ...k.items[items[i]], ...v } } });
-    assert.throws(() => blind.unblind(g, mut(0, { dir: '../x' })), /anahtar girdisi/);
-    assert.throws(() => blind.unblind(g, mut(0, { id: 'other-task' })), /anahtar girdisi/);
-    assert.throws(() => blind.unblind(g, mut(1, { run: k.items[items[0]].run })), /iki kez/);
+    assert.throws(() => blind.unblind(g, mut(0, { dir: '../x' }), roots(root)), /anahtar girdisi/);
+    assert.throws(() => blind.unblind(g, mut(0, { id: 'other-task' }), roots(root)), /anahtar girdisi/);
+    assert.throws(() => blind.unblind(g, mut(1, { run: k.items[items[0]].run }), roots(root)), /iki kez/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -172,5 +175,35 @@ test('notları yazma: özette ölçülmemiş bir denemeye not yazılmaz, eksik n
     assert.ok(!fs.existsSync(path.join(root, 'r-a', 'grades-opus.json')), 'yarım yazılmamalı');
     assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1 } } }, 'opus', root), /için not yok/);
     assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root).length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('anahtarı açma: sonuç klasörlerini değiş tokuş eden anahtar reddedilir (model ve cevap özeti kaynağa bağlı)', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'answer of x']]);
+    const b = makeResults(root, 'r-b', 'gpt-y', [['t1', 1, 'answer of y']]);
+    const key = path.join(root, 'key.json');
+    blind.pack({ dirs: [a, b], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root });
+    const k = JSON.parse(fs.readFileSync(key, 'utf8'));
+    const g = Object.fromEntries(Object.keys(k.items).map(i => [i, { claims: { c1: true } }]));
+    assert.doesNotThrow(() => blind.unblind(g, k, roots(root)));
+    const swapped = { ...k, items: Object.fromEntries(Object.entries(k.items).map(([i, e]) => [i, { ...e, dir: e.dir === 'r-a' ? 'r-b' : 'r-a' }])) };
+    assert.throws(() => blind.unblind(g, swapped, roots(root)), /kaynak özetle/);
+    const swappedAll = { ...k, items: Object.fromEntries(Object.entries(k.items).map(([i, e]) => [i, { ...e, dir: e.dir === 'r-a' ? 'r-b' : 'r-a', model: e.model === 'gpt-x' ? 'gpt-y' : 'gpt-x' }])) };
+    assert.throws(() => blind.unblind(g, swappedAll, roots(root)), /kaynak cevapla/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('paketleme: henüz var olmayan paket klasörüne işaret eden (sarkan) takma ad da reddedilir; paket klasörü geride kalmaz', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    const out = path.join(root, 'pkg');
+    const alias = path.join(root, 'pkg-alias');
+    fs.symlinkSync(out, alias, 'junction');
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.ok(!fs.existsSync(path.join(out, 'key.json')));
+    assert.ok(!fs.existsSync(out), 'oluşturulan boş paket klasörü kaldırılmalı');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

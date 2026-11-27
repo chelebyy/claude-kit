@@ -950,3 +950,27 @@ test('aynı gün tekrar: farklı tekrar sayısı, bölüm ya da görev sürümü
     fs.rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('tek görevlik tekrar öteki görevlerin sürüm bilgisini korur; sürümsüz eski özete sürümlü görev eklenmez', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const a = { model: 'gpt-x', effort: 'high', tier: 'default', repeats: 1 };
+  const write = s => fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({ model: 'gpt-x', effort: 'high', tier: 'default', cyberAccessProgram: null, ...s }));
+  try {
+    write({ tasks: [{ id: 'old', pass: true }] });
+    assert.throws(() => runModule.previousResults(outDir, a, { t: { split: 'frozen', version: 1 } }), /sürüm bilgisi olmayan/);
+    assert.doesNotThrow(() => runModule.previousResults(outDir, a, { t: { split: null, version: null } }));
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('tek görevlik tekrarda önceki özetin sürüm bilgisi okunur', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({ taskVersions: { a: { split: 'frozen', version: 2 } } }));
+    assert.deepStrictEqual(runModule.previousTaskVersions(outDir), { a: { split: 'frozen', version: 2 } });
+    assert.deepStrictEqual(runModule.previousTaskVersions(path.join(outDir, 'yok')), {});
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});

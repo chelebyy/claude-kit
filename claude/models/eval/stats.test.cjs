@@ -94,19 +94,19 @@ test('geride kalmama payı: 20 puan geride kalan aday geçmez; eşit aday geçer
   const A = ids.flatMap((id, i) => runs(id, i < 2 ? [false, false, false] : [true, true, true]));
   const worse = pairedCompare(A, B, { seed: 1 });
   assert.strictEqual(worse.meanDiff, -0.2);
-  assert.strictEqual(worse.nonInferior, false, JSON.stringify(worse));
+  assert.strictEqual(worse.withinMargin, false, JSON.stringify(worse));
   const same = pairedCompare(B, B, { seed: 1 });
-  assert.strictEqual(same.nonInferior, true);
+  assert.strictEqual(same.withinMargin, true);
 });
 
 test('geride kalmama: 3 görevden az ya da dışarıda kalan görev varsa kanıt sayılmaz', () => {
   const two = ['a', 'b'].flatMap(id => runs(id, [true]));
-  assert.strictEqual(pairedCompare(two, two, { seed: 1 }).nonInferior, false);
+  assert.strictEqual(pairedCompare(two, two, { seed: 1 }).withinMargin, false);
   const A = ['a', 'b', 'c', 'd'].flatMap(id => runs(id, [true]));
   const B = [...['a', 'b', 'c'].flatMap(id => runs(id, [true])), ...runs('d', [null])];
   const c = pairedCompare(A, B, { seed: 1 });
   assert.deepStrictEqual(c.excluded, ['d']);
-  assert.strictEqual(c.nonInferior, false);
+  assert.strictEqual(c.withinMargin, false);
 });
 
 test('karşılaştırılabilirlik: farklı bölüm, tekrar sayısı ya da görev sürümü reddedilir', () => {
@@ -123,4 +123,66 @@ test('karşılaştırılabilirlik: aynı deneme iki kez ya da tekrar sayısını
   const good = { ...base, tasks: runs('a', [true, true, true]) };
   assert.throws(() => compatibility(good, { ...base, tasks: [...runs('a', [true, true]), { id: 'a', run: 2, pass: true }] }), /iki kez/);
   assert.throws(() => compatibility(good, { ...base, tasks: runs('a', [true, true, true, true, true]) }), /aşıyor/);
+});
+
+const { approvalCheck } = require('./stats.cjs');
+
+function frozenSummary(model, ids, passFor, over = {}) {
+  return {
+    model, split: 'frozen', repeats: 3,
+    taskVersions: Object.fromEntries(ids.map(id => [id, { split: 'frozen', version: 1 }])),
+    tasks: ids.flatMap(id => runs(id, [1, 2, 3].map(k => passFor(id, k)))),
+    ...over,
+  };
+}
+const EXP = { t1: { split: 'frozen', version: 1 }, t2: { split: 'frozen', version: 1 }, t3: { split: 'frozen', version: 1 }, t4: { split: 'frozen', version: 1 } };
+const IDS = Object.keys(EXP);
+
+test('onay: kilitli setin tamamı, 3 tam tekrar ve eşit sonuç geçer', () => {
+  const a = frozenSummary('a', IDS, () => true), b = frozenSummary('b', IDS, () => true);
+  const r = approvalCheck(a, b, EXP);
+  assert.strictEqual(r.passes, true, JSON.stringify(r.reasons));
+});
+
+test('onay: yarım kalmış çalıştırma (eksik görev ya da eksik deneme) geçmez', () => {
+  const b = frozenSummary('b', IDS, () => true);
+  const partial = frozenSummary('a', IDS.slice(0, 3), () => true);
+  assert.strictEqual(approvalCheck(partial, b, EXP).passes, false);
+  const fewRuns = { ...frozenSummary('a', IDS, () => true) };
+  fewRuns.tasks = fewRuns.tasks.filter(r => r.run === 1);
+  const r = approvalCheck(fewRuns, b, EXP);
+  assert.strictEqual(r.passes, false);
+  assert.ok(r.reasons.some(x => /denemeleri/.test(x)), JSON.stringify(r.reasons));
+});
+
+test('onay: ölçülmemiş deneme, dev bölümü, 1 tekrar ya da sürümsüz özet geçmez', () => {
+  const b = frozenSummary('b', IDS, () => true);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, (id, k) => (k === 2 ? null : true)), b, EXP).passes, false);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { split: 'dev' }), b, EXP).passes, false);
+  assert.strictEqual(approvalCheck(frozenSummary('a', IDS, () => true, { repeats: 1 }), b, EXP).passes, false);
+  const nov = frozenSummary('a', IDS, () => true); delete nov.taskVersions;
+  const nov2 = frozenSummary('b', IDS, () => true); delete nov2.taskVersions;
+  assert.strictEqual(approvalCheck(nov, nov2, EXP).passes, false);
+});
+
+test('onay: depodakinden farklı görev sürümü ya da sette olmayan görev geçmez', () => {
+  const b = frozenSummary('b', IDS, () => true);
+  const a = frozenSummary('a', IDS, () => true);
+  assert.strictEqual(approvalCheck(a, b, { ...EXP, t1: { split: 'frozen', version: 2 } }).passes, false);
+  const extra = frozenSummary('a', [...IDS, 't5'], () => true);
+  assert.strictEqual(approvalCheck(extra, b, EXP).passes, false);
+});
+
+test('onay: pay sabittir; belirgin geride kalan aday geçmez (keşif payı ne olursa olsun)', () => {
+  const b = frozenSummary('b', IDS, () => true);
+  const a = frozenSummary('a', IDS, id => id === 't1' || id === 't2' ? false : true);
+  const r = approvalCheck(a, b, EXP, { margin: 1 });
+  assert.strictEqual(r.passes, false);
+  assert.ok(r.reasons.some(x => /alt ucu/.test(x)), JSON.stringify(r.reasons));
+});
+
+test('onay: tekrar edilen zaman aşımları bilgi olarak sayılır', () => {
+  const a = frozenSummary('a', IDS, () => true);
+  a.tasks[0].timeoutRetries = [{ pass: null }];
+  assert.deepStrictEqual(approvalCheck(a, frozenSummary('b', IDS, () => true), EXP).timeoutRetries, { A: 1, B: 0 });
 });

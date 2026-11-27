@@ -5,7 +5,8 @@
 //   node claude/models/eval/stats.cjs <klasör-A> <klasör-B> [--grades <ad>]  eşleştirilmiş karşılaştırma
 // --grades <ad>: her klasördeki grades-<ad>.json (blind.cjs unblind --label <ad> çıktısı) puan olarak kullanılır;
 // verilmezse puan geçti = 1, kaldı = 0'dır. Verildiyse ölçülmüş her denemenin notu olmalıdır (eksik not hata).
-// --margin <0-1>: geride kalmama (non-inferiority) payı, varsayılan 0.25. Ayrıntılar: claude/models/README.md ("Tekrar ve istatistik").
+// --margin <0-1>: yalnızca keşif için withinMargin payı (varsayılan 0.25). Rol kararına giren approval alanı bu
+// bayraktan etkilenmez: sabit pay 0.25, frozen bölüm, 3 tam tekrar ve depodaki kilitli görev seti (APPROVAL). Ayrıntılar: claude/models/README.md ("Tekrar ve istatistik").
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -85,8 +86,8 @@ function checkAttempts(results, repeats, side) {
 // A ile B'yi görev bazında eşleştirerek karşılaştırır: her görevde ortalama puan farkı (A − B), görevler
 // üzerinden ortalama fark ve görevleri yeniden örnekleyen %95 bootstrap aralığı. Denemeler aynı görevde
 // birbirine bağlı olduğu için birim görevdir, deneme değil. Aralık sıfırı dışlamıyorsa karar "açık fark yok".
-// nonInferior: A, B'den "payından fazla geride değil" kanıtı: aralığın alt ucu -margin'in üstünde, en az 3 görev
-// karşılaştırılmış ve hiçbir görev dışarıda kalmamış. Rol kararı buna bakar (README "Karar kuralı").
+// withinMargin: A, B'den "payından fazla geride değil": aralığın alt ucu -margin'in üstünde, en az 3 görev
+// karşılaştırılmış ve hiçbir görev dışarıda kalmamış. Keşif içindir; rol kararı approvalCheck'e bakar.
 function pairedCompare(A, B, { gradesA, gradesB, seed = 1, iterations = 10000, margin = DEFAULT_MARGIN } = {}) {
   if (!(typeof margin === 'number' && margin >= 0 && margin <= 1)) throw new Error('margin 0 ile 1 arasında olmalı');
   const ma = taskMeans(A, gradesA), mb = taskMeans(B, gradesB);
@@ -96,7 +97,7 @@ function pairedCompare(A, B, { gradesA, gradesB, seed = 1, iterations = 10000, m
   const diffs = ids.map(id => ma.get(id) - mb.get(id));
   const n = diffs.length;
   const base = { tasks: n, excluded, margin, perTask: Object.fromEntries(ids.map((id, i) => [id, diffs[i]])) };
-  if (!n) return { ...base, meanDiff: null, ci: null, halfWidth: null, verdict: 'not enough data', nonInferior: false };
+  if (!n) return { ...base, meanDiff: null, ci: null, halfWidth: null, verdict: 'not enough data', withinMargin: false };
   const mean = xs => xs.reduce((s, x) => s + x, 0) / xs.length;
   const meanDiff = mean(diffs);
   const rand = rng(seed);
@@ -109,8 +110,8 @@ function pairedCompare(A, B, { gradesA, gradesB, seed = 1, iterations = 10000, m
   boots.sort((x, y) => x - y);
   const ci = [boots[Math.floor(0.025 * (iterations - 1))], boots[Math.ceil(0.975 * (iterations - 1))]];
   const verdict = n < MIN_TASKS ? 'not enough data' : ci[0] > 0 ? 'A better' : ci[1] < 0 ? 'B better' : 'no clear difference';
-  const nonInferior = n >= MIN_TASKS && !excluded.length && ci[0] > -margin;
-  return { ...base, meanDiff, ci, halfWidth: (ci[1] - ci[0]) / 2, verdict, nonInferior };
+  const withinMargin = n >= MIN_TASKS && !excluded.length && ci[0] > -margin;
+  return { ...base, meanDiff, ci, halfWidth: (ci[1] - ci[0]) / 2, verdict, withinMargin };
 }
 
 function readSummary(dir) {
@@ -141,6 +142,52 @@ function compatibility(a, b) {
   checkAttempts(b.tasks, reps(b), 'B');
 }
 
+// Rol kararının sabit koşulları; komut satırından değiştirilemez.
+const APPROVAL = Object.freeze({ split: 'frozen', repeats: 3, margin: 0.25 });
+
+// Depodaki kilitli görev seti: { <id>: { split, version } } (güvenilen kaynak; özetteki kopya değil).
+function frozenTasks(tasksRoot = path.join(__dirname, 'tasks')) {
+  const out = {};
+  for (const e of fs.readdirSync(tasksRoot, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    let t;
+    try { t = JSON.parse(fs.readFileSync(path.join(tasksRoot, e.name, 'task.json'), 'utf8')); } catch { continue; }
+    if (t.split === 'frozen') out[t.id] = { split: 'frozen', version: t.version || null };
+  }
+  return out;
+}
+
+// A (aday) rolü alabilir mi? Yalnızca şu kanıt sayılır: iki özet de frozen bölümde, tam 3 tekrarla, depodaki
+// kilitli görev setinin tamamıyla (aynı sürümler) çalışmış; her görevin 1..3 denemesinin hepsi ölçülmüş;
+// sabit 0.25 payla aralığın alt ucu -0.25'in üstünde. Eksik, yarım kalmış, başka bölümden ya da sürümden
+// gelen kanıt geçmez. timeoutRetries yalnızca bilgi içindir (bkz. README, bilinen sınır).
+function approvalCheck(a, b, expected, opts = {}) {
+  const reasons = [];
+  const ids = Object.keys(expected).sort();
+  if (ids.length < MIN_TASKS) reasons.push(`kilitli sette ${ids.length} görev var (en az ${MIN_TASKS})`);
+  for (const [side, s] of [['A', a], ['B', b]]) {
+    if (s.split !== APPROVAL.split) reasons.push(`${side}: bölüm ${s.split || 'yok'} (frozen olmalı)`);
+    if (s.repeats !== APPROVAL.repeats) reasons.push(`${side}: tekrar ${s.repeats === undefined ? 1 : s.repeats} (${APPROVAL.repeats} olmalı)`);
+    const tv = s.taskVersions || {};
+    const tvIds = Object.keys(tv).sort();
+    if (tvIds.join('\n') !== ids.join('\n')) reasons.push(`${side}: görev seti depodaki kilitli setle aynı değil`);
+    for (const id of ids) {
+      if (tv[id] && (tv[id].version !== expected[id].version || tv[id].split !== 'frozen')) reasons.push(`${side}: ${id} sürümü depodakinden farklı`);
+      const got = s.tasks.filter(r => r.id === id);
+      const runs = got.map(runOf).sort((x, y) => x - y).join(',');
+      const want = Array.from({ length: APPROVAL.repeats }, (_, k) => k + 1).join(',');
+      if (runs !== want) reasons.push(`${side}: ${id} denemeleri ${runs || 'yok'} (${want} olmalı)`);
+      else if (got.some(r => r.pass !== true && r.pass !== false)) reasons.push(`${side}: ${id} ölçülmemiş deneme var`);
+    }
+    for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
+  }
+  const cmp = pairedCompare(a.tasks, b.tasks, { ...opts, margin: APPROVAL.margin });
+  if (cmp.excluded.length) reasons.push(`dışarıda kalan görevler: ${cmp.excluded.join(', ')}`);
+  if (!cmp.ci || !(cmp.ci[0] > -APPROVAL.margin)) reasons.push(`aralığın alt ucu ${cmp.ci ? cmp.ci[0] : 'yok'} (-${APPROVAL.margin}'in üstünde olmalı)`);
+  const retries = s => s.tasks.filter(r => Array.isArray(r.timeoutRetries) && r.timeoutRetries.length).length;
+  return { passes: !reasons.length, reasons: [...new Set(reasons)], ci: cmp.ci, meanDiff: cmp.meanDiff, timeoutRetries: { A: retries(a), B: retries(b) } };
+}
+
 function main(argv) {
   const dirs = [];
   let label, margin;
@@ -153,11 +200,14 @@ function main(argv) {
   if (dirs.length !== 2) throw new Error('kullanım: stats.cjs <klasör> | <klasör-A> <klasör-B> [--grades <ad>]');
   const [a, b] = dirs.map(readSummary);
   compatibility(a, b);
-  return { A: a.model, B: b.model, split: a.split || null, ...pairedCompare(a.tasks, b.tasks, { gradesA: readGrades(dirs[0], label), gradesB: readGrades(dirs[1], label), ...(margin !== undefined ? { margin } : {}) }) };
+  const grades = { gradesA: readGrades(dirs[0], label), gradesB: readGrades(dirs[1], label) };
+  return { A: a.model, B: b.model, split: a.split || null,
+    ...pairedCompare(a.tasks, b.tasks, { ...grades, ...(margin !== undefined ? { margin } : {}) }),
+    approval: approvalCheck(a, b, frozenTasks(), grades) };
 }
 
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)), null, 2)); } catch (e) { console.error(`model-eval stats: ${e.message}`); process.exit(1); }
 } else {
-  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, rng, main, DEFAULT_MARGIN };
+  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
 }

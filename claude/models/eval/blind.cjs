@@ -14,6 +14,8 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
 const { rng } = require('./stats.cjs');
 
 const ROOT = __dirname;
@@ -93,14 +95,25 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
       const f = path.join(dir, answerFile(t.id, run));
       const st = fs.lstatSync(f, { throwIfNoEntry: false });
       if (!st || !st.isFile()) throw new Error(`${rel}/${answerFile(t.id, run)}: cevap dosyası yok ya da normal dosya değil`);
-      const text = redactModel(fs.readFileSync(f, 'utf8'), s.model);
+      const raw = fs.readFileSync(f);
+      const text = redactModel(raw.toString('utf8'), s.model);
       if (!groups.has(t.id)) groups.set(t.id, []);
-      groups.get(t.id).push({ dir: rel, id: t.id, run, model: s.model, effort: s.effort || null, text });
+      groups.get(t.id).push({ dir: rel, id: t.id, run, model: s.model, effort: s.effort || null, sha256: sha256(raw), text });
     }
   }
   const ost = fs.lstatSync(out, { throwIfNoEntry: false });
   if (ost && (!ost.isDirectory() || ost.isSymbolicLink() || fs.readdirSync(out).length)) throw new Error(`${out}: paket klasörü boş bir klasör olmalı`);
+  const created = !ost;
   fs.mkdirSync(out, { recursive: true });
+  // Paket klasörü oluştuktan sonra yeniden denetlenir: henüz var olmayan klasöre işaret eden (sarkan) bir
+  // takma ad, klasör oluşunca çözülür. Anahtarın klasörü var olmalıdır.
+  const keyDir = path.dirname(path.resolve(key));
+  const keyReal = fs.existsSync(keyDir) ? path.join(fs.realpathSync(keyDir), path.basename(key)) : null;
+  const rk = keyReal && path.relative(fs.realpathSync(out), keyReal);
+  if (!keyReal || !rk || (!rk.startsWith('..') && !path.isAbsolute(rk))) {
+    if (created) fs.rmdirSync(out);
+    throw new Error(keyReal ? 'anahtar dosyası paket klasörünün içinde olamaz' : 'anahtar dosyasının klasörü yok');
+  }
   const rand = rng(seed);
   const items = {};
   const claims = {};
@@ -111,9 +124,10 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
     shuffle(groups.get(id), rand).forEach((e, i) => {
       const L = letter(i);
       fs.writeFileSync(path.join(out, id, `${L}.md`), e.text, { flag: 'wx' });
-      items[`${id}/${L}`] = { dir: e.dir, id: e.id, run: e.run, model: e.model, effort: e.effort };
+      items[`${id}/${L}`] = { dir: e.dir, id: e.id, run: e.run, model: e.model, effort: e.effort, sha256: e.sha256 };
     });
   }
+  // claims yalnızca bilgi içindir; unblind maddeleri anahtardan değil görev tanımından okur.
   fs.writeFileSync(key, JSON.stringify({ seed, items, claims }, null, 2) + '\n', { flag: 'wx' });
   return { items: Object.keys(items).length, tasks: groups.size };
 }
@@ -157,9 +171,11 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 // Notları anahtarla açar: { "<sonuç klasörü>": { "<görev>#<deneme>": { score, max } } }.
 // Puanlayıcının çıktısı model etkisindeki bir veridir; seçerek eksik bırakılan, uydurulan ya da başka bir
 // hedefe yönlendirilen not kabul edilmez: not dosyası anahtardaki cevapların tamamını, yalnızca onları taşır;
-// her cevabın maddeleri görevin rubrik maddeleriyle (task.json claims) ya da yoksa aynı görevin öteki
-// cevaplarıyla aynıdır; anahtardaki her hedef geçerli ve tektir.
-function unblind(grades, key) {
+// her cevabın maddeleri görevin rubrik maddeleriyle (depodaki task.json claims; anahtardaki kopya kullanılmaz)
+// ya da liste yoksa aynı görevin öteki cevaplarıyla aynıdır; anahtardaki her hedef geçerli ve tektir. Anahtar
+// da kaynağına bağlıdır: her girdinin klasöründeki özetin modeli ve eforu, cevap dosyasının içerik özeti
+// paketlenen cevapla aynı olmalıdır (klasörleri değiş tokuş eden bir anahtar reddedilir).
+function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksRoot = path.join(ROOT, 'tasks') } = {}) {
   if (!key || !key.items || typeof key.items !== 'object') throw new Error('anahtar geçersiz');
   for (const item of Object.keys(grades)) {
     if (!ITEM_RE.test(item)) throw new Error(`${item}: geçersiz cevap adı`);
@@ -177,10 +193,17 @@ function unblind(grades, key) {
     const t = `${k.dir}#${k.id}#${k.run}`;
     if (targets.has(t)) throw new Error(`${item}: anahtarda aynı hedef iki kez`);
     targets.add(t);
+    const dir = path.join(resultsRoot, ...k.dir.split('/'));
+    if (!fs.existsSync(dir) || !inside(resultsRoot, dir)) throw new Error(`${item}: sonuç klasörü sonuç kökü içinde değil`);
+    const s = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8'));
+    if (s.model !== k.model || (s.effort || null) !== (k.effort === undefined ? null : k.effort)) throw new Error(`${item}: anahtar girdisi kaynak özetle (model, efor) uyuşmuyor`);
+    const af = path.join(dir, answerFile(k.id, k.run));
+    const ast = fs.lstatSync(af, { throwIfNoEntry: false });
+    if (!ast || !ast.isFile() || typeof k.sha256 !== 'string' || sha256(fs.readFileSync(af)) !== k.sha256) throw new Error(`${item}: anahtar girdisi kaynak cevapla uyuşmuyor`);
     const c = claimsOf(grades[item], item);
     const names = Object.keys(c).sort();
     if (!names.length) throw new Error(`${item}: hiç madde yok`);
-    const expected = key.claims && Array.isArray(key.claims[k.id]) ? key.claims[k.id] : taskClaimSet[k.id];
+    const expected = taskClaims(tasksRoot, k.id) || taskClaimSet[k.id];
     if (expected && expected.join('\n') !== names.join('\n')) throw new Error(`${item}: maddeler rubrikle ya da aynı görevin öteki cevaplarıyla aynı değil`);
     taskClaimSet[k.id] = names;
     (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: names.filter(n => c[n]).length, max: names.length };
