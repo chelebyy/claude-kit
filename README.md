@@ -36,7 +36,7 @@ Hook'lar Node'un mutlak yoluyla kaydedilir. Node'u başka bir yere taşır ya da
   - `model-watch`: kayıtta olmayan yeni Codex modellerini bildirir.
   - `auto-plugins`: projeye göre, yalnızca makinende kurulu olan plugin ve skill'leri açar.
 - Model kaydı: `~/.claude/models/registry.json`.
-- Ajanlar: `reviewer-*` (teslim öncesi inceleme), `advisor-*` (Fable danışman), `worker-*`.
+- Ajanlar: `reviewer-*` (teslim öncesi inceleme), `advisor-*` (Fable danışman), `worker-*`, `Explore` (yerleşik Explore'un yerine Haiku ile çalışan, yalnızca okuyan keşif ajanı).
 - Skill'ler: `local-code-review`, `local-security-review`, `postgres-schema` (PostgreSQL ve Supabase şema, migration ve RLS işleri), `find-skills`.
 - Plugin'ler: `commit-commands`, `claude-md-management`.
 
