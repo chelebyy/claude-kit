@@ -22,10 +22,12 @@ const ROOT = __dirname;
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ITEM_RE = /^([a-z0-9][a-z0-9._-]{0,63})\/([A-Z]{1,3})$/;
 
+// Göreli yol üst klasöre çıkıyor mu? Yalnızca tam bir `..` bölümü sayılır (`..x.json` bir dosya adıdır).
+const escapes = r => r === '..' || r.startsWith(`..${path.sep}`) || r.startsWith('../') || path.isAbsolute(r);
 // p, root'un içinde mi (bağlantılar çözüldükten sonra)?
 function inside(root, p) {
   const r = path.relative(fs.realpathSync(root), fs.realpathSync(p));
-  return Boolean(r) && !r.startsWith('..') && !path.isAbsolute(r);
+  return Boolean(r) && !escapes(r);
 }
 // Henüz var olmayabilecek bir yolu, var olan en yakın üst klasörünün gerçek yolu (bağlantılar çözülmüş)
 // üzerinden mutlak yola çevirir: klasöre bir takma ad (symlink, junction) üzerinden verilen yol da aynı
@@ -43,7 +45,7 @@ function realish(p) {
 }
 function under(dir, p) {
   const r = path.relative(realish(dir), realish(p));
-  return !r || (!r.startsWith('..') && !path.isAbsolute(r));
+  return !r || !escapes(r);
 }
 
 function letter(i) {
@@ -110,7 +112,7 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
   const keyDir = path.dirname(path.resolve(key));
   const keyReal = fs.existsSync(keyDir) ? path.join(fs.realpathSync(keyDir), path.basename(key)) : null;
   const rk = keyReal && path.relative(fs.realpathSync(out), keyReal);
-  if (!keyReal || !rk || (!rk.startsWith('..') && !path.isAbsolute(rk))) {
+  if (!keyReal || !rk || !escapes(rk)) {
     if (created) fs.rmdirSync(out);
     throw new Error(keyReal ? 'anahtar dosyası paket klasörünün içinde olamaz' : 'anahtar dosyasının klasörü yok');
   }
@@ -172,7 +174,7 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 // Puanlayıcının çıktısı model etkisindeki bir veridir; seçerek eksik bırakılan, uydurulan ya da başka bir
 // hedefe yönlendirilen not kabul edilmez: not dosyası anahtardaki cevapların tamamını, yalnızca onları taşır;
 // her cevabın maddeleri görevin rubrik maddeleriyle (depodaki task.json claims; anahtardaki kopya kullanılmaz)
-// ya da liste yoksa aynı görevin öteki cevaplarıyla aynıdır; anahtardaki her hedef geçerli ve tektir. Anahtar
+// aynıdır; görevde claims listesi yoksa açma durur (maddeleri puanlayıcı belirleyemez); anahtardaki her hedef geçerli ve tektir. Anahtar
 // da kaynağına bağlıdır: her girdinin klasöründeki özetin modeli ve eforu, cevap dosyasının içerik özeti
 // paketlenen cevapla aynı olmalıdır (klasörleri değiş tokuş eden bir anahtar reddedilir).
 function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksRoot = path.join(ROOT, 'tasks') } = {}) {
@@ -184,7 +186,6 @@ function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksR
   const missing = Object.keys(key.items).filter(item => !has(grades, item));
   if (missing.length) throw new Error(`not eksik: ${missing.slice(0, 10).join(', ')}`);
   const targets = new Set();
-  const taskClaimSet = {};
   const out = {};
   for (const [item, k] of Object.entries(key.items)) {
     const m = ITEM_RE.exec(item);
@@ -203,9 +204,9 @@ function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksR
     const c = claimsOf(grades[item], item);
     const names = Object.keys(c).sort();
     if (!names.length) throw new Error(`${item}: hiç madde yok`);
-    const expected = taskClaims(tasksRoot, k.id) || taskClaimSet[k.id];
-    if (expected && expected.join('\n') !== names.join('\n')) throw new Error(`${item}: maddeler rubrikle ya da aynı görevin öteki cevaplarıyla aynı değil`);
-    taskClaimSet[k.id] = names;
+    const expected = taskClaims(tasksRoot, k.id);
+    if (!expected || !expected.length) throw new Error(`${item}: ${k.id} görevinin task.json'unda claims listesi yok; kör notlar açılamaz`);
+    if (expected.join('\n') !== names.join('\n')) throw new Error(`${item}: maddeler görevin rubrik maddeleriyle aynı değil`);
     (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: names.filter(n => c[n]).length, max: names.length };
   }
   return out;

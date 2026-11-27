@@ -98,8 +98,10 @@ test('anahtarı açma: notlar deneme kimliğine (görev#deneme) ve sonuç klasö
   const root = tmp();
   try {
     const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    fs.mkdirSync(path.join(root, 'tasks', 't1'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', 't1', 'task.json'), JSON.stringify({ id: 't1', claims: ['c1', 'c2'] }));
     const key = path.join(root, 'key.json');
-    blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 2, resultsRoot: root });
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 2, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     const k = JSON.parse(fs.readFileSync(key, 'utf8'));
     const grades = Object.fromEntries(Object.keys(k.items).map(item => [item, { claims: { c1: true, c2: k.items[item].run === 2 } }]));
     const out = blind.unblind(grades, k, { resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
@@ -147,15 +149,17 @@ test('anahtarı açma: eksik bırakılan cevap, rubrikte olmayan madde ve tutars
     assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, k, roots(root)), /rubrik/);
     // Anahtardaki madde listesi kullanılmaz: depodaki task.json'dakiler geçerlidir.
     assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, { ...k, claims: { t1: ['invented'] } }, roots(root)), /rubrik/);
+    // Görevde rubrik maddeleri tanımlı değilse maddeleri puanlayıcı belirleyemez: açma durur.
     fs.rmSync(path.join(root, 'tasks'), { recursive: true });
-    assert.throws(() => blind.unblind({ ...full, [items[1]]: { claims: { c1: true } } }, k, roots(root)), /öteki cevaplarıyla/);
+    const invented = Object.fromEntries(items.map(i => [i, { claims: { invented: true } }]));
+    assert.throws(() => blind.unblind(invented, k, roots(root)), /claims listesi yok/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('anahtarı açma: başka klasöre, başka göreve yönlendiren ya da aynı hedefi iki kez veren anahtar reddedilir', () => {
   const root = tmp();
   try {
-    const k = packed(root, [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    const k = packed(root, [['t1', 1, 'x'], ['t1', 2, 'y']], ['c1']);
     const items = Object.keys(k.items);
     const g = Object.fromEntries(items.map(i => [i, { claims: { c1: true } }]));
     const mut = (i, v) => ({ ...k, items: { ...k.items, [items[i]]: { ...k.items[items[i]], ...v } } });
@@ -183,6 +187,8 @@ test('anahtarı açma: sonuç klasörlerini değiş tokuş eden anahtar reddedil
   try {
     const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'answer of x']]);
     const b = makeResults(root, 'r-b', 'gpt-y', [['t1', 1, 'answer of y']]);
+    fs.mkdirSync(path.join(root, 'tasks', 't1'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', 't1', 'task.json'), JSON.stringify({ id: 't1', claims: ['c1'] }));
     const key = path.join(root, 'key.json');
     blind.pack({ dirs: [a, b], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root });
     const k = JSON.parse(fs.readFileSync(key, 'utf8'));
@@ -205,5 +211,18 @@ test('paketleme: henüz var olmayan paket klasörüne işaret eden (sarkan) takm
     assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
     assert.ok(!fs.existsSync(path.join(out, 'key.json')));
     assert.ok(!fs.existsSync(out), 'oluşturulan boş paket klasörü kaldırılmalı');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('paketleme: ".." ile başlayan bir dosya adı üst klasör sayılmaz; takma ad üzerinden paketin içine yazılamaz', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    const out = path.join(root, 'pkg');
+    const alias = path.join(root, 'pkg-alias');
+    fs.symlinkSync(out, alias, 'junction');
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.ok(!fs.existsSync(path.join(out, '..identity.json')));
+    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'pkg2'), key: path.join(root, 'pkg2', '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

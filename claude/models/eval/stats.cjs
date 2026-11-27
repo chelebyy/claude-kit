@@ -5,10 +5,13 @@
 //   node claude/models/eval/stats.cjs <klasör-A> <klasör-B> [--grades <ad>]  eşleştirilmiş karşılaştırma
 // --grades <ad>: her klasördeki grades-<ad>.json (blind.cjs unblind --label <ad> çıktısı) puan olarak kullanılır;
 // verilmezse puan geçti = 1, kaldı = 0'dır. Verildiyse ölçülmüş her denemenin notu olmalıdır (eksik not hata).
+// --role <rol>: onay kontrolü için B'nin (mevcut model) kayıtta bu rolle onaylı olması gerekir; verilmezse
+// approval.passes false olur.
 // --margin <0-1>: yalnızca keşif için withinMargin payı (varsayılan 0.25). Rol kararına giren approval alanı bu
 // bayraktan etkilenmez: sabit pay 0.25, frozen bölüm, 3 tam tekrar ve depodaki kilitli görev seti (APPROVAL). Ayrıntılar: claude/models/README.md ("Tekrar ve istatistik").
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const runOf = r => (Number.isInteger(r.run) && r.run >= 1 ? r.run : 1);
@@ -161,8 +164,36 @@ function frozenTasks(tasksRoot = path.join(__dirname, 'tasks')) {
 // kilitli görev setinin tamamıyla (aynı sürümler) çalışmış; her görevin 1..3 denemesinin hepsi ölçülmüş;
 // sabit 0.25 payla aralığın alt ucu -0.25'in üstünde. Eksik, yarım kalmış, başka bölümden ya da sürümden
 // gelen kanıt geçmez. timeoutRetries yalnızca bilgi içindir (bkz. README, bilinen sınır).
+// Kayıt yalnızca hesabın gerçek ev klasöründen okunur (run.cjs ile aynı; HOME/USERPROFILE yok sayılır).
+function loadRegistry() {
+  return JSON.parse(fs.readFileSync(path.join(os.userInfo().homedir, '.claude', 'models', 'registry.json'), 'utf8'));
+}
+
+// B, kayıtta verilen rolde onaylı mevcut model olmalı; A ondan farklı bir model olmalı. Codex modellerinde
+// B'nin eforu kayıttaki efforts listesinde olmalı. Claude rolleri serbest metindir ("main and reviewer (alias
+// opus)"): rol sözcüğü metnin sözcüklerinden biri olmalı.
+function baselineProblem(a, b, role, registry) {
+  if (!role) return 'rol verilmedi (--role): mevcut model doğrulanamaz';
+  if (!registry) return 'model kaydı okunamadı';
+  if (a.model === b.model) return 'A ile B aynı model';
+  for (const fam of ['codex', 'claude']) {
+    const sec = registry[fam] || {};
+    if (!Object.prototype.hasOwnProperty.call(sec, b.model)) continue;
+    const e = sec[b.model];
+    const roleOk = typeof e.role === 'string' && (e.role === role || e.role.split(/[\s,()]+/).includes(role));
+    if (e.status !== 'approved' || !roleOk) return `B (${b.model}) kayıtta ${role} rolüyle onaylı değil`;
+    if (fam === 'codex' && Array.isArray(e.efforts) && !e.efforts.includes(b.effort)) return `B eforu (${b.effort}) kayıttaki efforts listesinde değil`;
+    return null;
+  }
+  return `B (${b.model}) kayıtta yok`;
+}
+
 function approvalCheck(a, b, expected, opts = {}) {
   const reasons = [];
+  let registry = opts.registry;
+  if (registry === undefined) { try { registry = loadRegistry(); } catch { registry = null; } }
+  const bp = baselineProblem(a, b, opts.role, registry);
+  if (bp) reasons.push(bp);
   const ids = Object.keys(expected).sort();
   if (ids.length < MIN_TASKS) reasons.push(`kilitli sette ${ids.length} görev var (en az ${MIN_TASKS})`);
   for (const [side, s] of [['A', a], ['B', b]]) {
@@ -181,7 +212,7 @@ function approvalCheck(a, b, expected, opts = {}) {
     }
     for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
   }
-  const cmp = pairedCompare(a.tasks, b.tasks, { ...opts, margin: APPROVAL.margin });
+  const cmp = pairedCompare(a.tasks, b.tasks, { gradesA: opts.gradesA, gradesB: opts.gradesB, margin: APPROVAL.margin });
   if (cmp.excluded.length) reasons.push(`dışarıda kalan görevler: ${cmp.excluded.join(', ')}`);
   if (!cmp.ci || !(cmp.ci[0] > -APPROVAL.margin)) reasons.push(`aralığın alt ucu ${cmp.ci ? cmp.ci[0] : 'yok'} (-${APPROVAL.margin}'in üstünde olmalı)`);
   const retries = s => s.tasks.filter(r => Array.isArray(r.timeoutRetries) && r.timeoutRetries.length).length;
@@ -190,24 +221,26 @@ function approvalCheck(a, b, expected, opts = {}) {
 
 function main(argv) {
   const dirs = [];
-  let label, margin;
+  let label, margin, role;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--grades') label = argv[++i];
     else if (argv[i] === '--margin') margin = Number(argv[++i]);
+    else if (argv[i] === '--role') role = argv[++i];
     else dirs.push(argv[i]);
   }
   if (dirs.length === 1) return { model: readSummary(dirs[0]).model, byTask: taskStats(readSummary(dirs[0]).tasks) };
   if (dirs.length !== 2) throw new Error('kullanım: stats.cjs <klasör> | <klasör-A> <klasör-B> [--grades <ad>]');
+  if (path.resolve(dirs[0]) === path.resolve(dirs[1])) throw new Error('A ile B aynı klasör');
   const [a, b] = dirs.map(readSummary);
   compatibility(a, b);
   const grades = { gradesA: readGrades(dirs[0], label), gradesB: readGrades(dirs[1], label) };
   return { A: a.model, B: b.model, split: a.split || null,
     ...pairedCompare(a.tasks, b.tasks, { ...grades, ...(margin !== undefined ? { margin } : {}) }),
-    approval: approvalCheck(a, b, frozenTasks(), grades) };
+    approval: approvalCheck(a, b, frozenTasks(), { ...grades, role }) };
 }
 
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)), null, 2)); } catch (e) { console.error(`model-eval stats: ${e.message}`); process.exit(1); }
 } else {
-  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
+  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, baselineProblem, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
 }
