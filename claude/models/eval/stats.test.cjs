@@ -25,9 +25,9 @@ test('eski özetlerde run alanı yoksa deneme 1 sayılır', () => {
   assert.strictEqual(s.a.runs, 1);
 });
 
-test('puan: notlandırma varsa oranı, yoksa geçti/kaldı; ölçülmeyen deneme puansız', () => {
+test('puan: notlandırma varsa oranı, notlandırma yoksa geçti/kaldı; ölçülmeyen deneme puansız', () => {
   assert.strictEqual(scoreOf({ id: 'a', run: 2, pass: false }, { 'a#2': { score: 3, max: 4 } }), 0.75);
-  assert.strictEqual(scoreOf({ id: 'a', run: 1, pass: true }, {}), 1);
+  assert.strictEqual(scoreOf({ id: 'a', run: 1, pass: true }), 1);
   assert.strictEqual(scoreOf({ id: 'a', run: 1, pass: false }), 0);
   assert.strictEqual(scoreOf({ id: 'a', run: 1, pass: null }, { 'a#1': { score: 1, max: 1 } }), null);
 });
@@ -76,4 +76,51 @@ test('karşılaştırılacak görev yoksa karar verilmez', () => {
   const c = pairedCompare(runs('a', [null]), runs('a', [true]), { seed: 1 });
   assert.strictEqual(c.tasks, 0);
   assert.strictEqual(c.verdict, 'not enough data');
+});
+
+const { compatibility } = require('./stats.cjs');
+
+test('kör notlar verildiyse ölçülmüş bir denemenin notu eksikse hata; geçti/kaldı puanına düşmez', () => {
+  assert.throws(() => scoreOf({ id: 'a', run: 1, pass: true }, {}), /not eksik: a#1/);
+  const ids = ['t1', 't2', 't3', 't4', 't5'];
+  const A = ids.flatMap(id => runs(id, [true])), B = ids.flatMap(id => runs(id, [true]));
+  const gradesB = Object.fromEntries(ids.map(id => [id + '#1', { score: 1, max: 2 }]));
+  assert.throws(() => pairedCompare(A, B, { gradesA: { 't1#1': { score: 1, max: 2 } }, gradesB }), /not eksik/);
+});
+
+test('geride kalmama payı: 20 puan geride kalan aday geçmez; eşit aday geçer', () => {
+  const ids = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10'];
+  const B = ids.flatMap(id => runs(id, [true, true, true]));
+  const A = ids.flatMap((id, i) => runs(id, i < 2 ? [false, false, false] : [true, true, true]));
+  const worse = pairedCompare(A, B, { seed: 1 });
+  assert.strictEqual(worse.meanDiff, -0.2);
+  assert.strictEqual(worse.nonInferior, false, JSON.stringify(worse));
+  const same = pairedCompare(B, B, { seed: 1 });
+  assert.strictEqual(same.nonInferior, true);
+});
+
+test('geride kalmama: 3 görevden az ya da dışarıda kalan görev varsa kanıt sayılmaz', () => {
+  const two = ['a', 'b'].flatMap(id => runs(id, [true]));
+  assert.strictEqual(pairedCompare(two, two, { seed: 1 }).nonInferior, false);
+  const A = ['a', 'b', 'c', 'd'].flatMap(id => runs(id, [true]));
+  const B = [...['a', 'b', 'c'].flatMap(id => runs(id, [true])), ...runs('d', [null])];
+  const c = pairedCompare(A, B, { seed: 1 });
+  assert.deepStrictEqual(c.excluded, ['d']);
+  assert.strictEqual(c.nonInferior, false);
+});
+
+test('karşılaştırılabilirlik: farklı bölüm, tekrar sayısı ya da görev sürümü reddedilir', () => {
+  const s = (over = {}) => ({ model: 'm', split: 'frozen', repeats: 3, taskVersions: { a: { split: 'frozen', version: 1 } }, tasks: runs('a', [true, true, true]), ...over });
+  assert.doesNotThrow(() => compatibility(s(), s()));
+  assert.throws(() => compatibility(s(), s({ split: 'dev' })), /bölümler farklı/);
+  assert.throws(() => compatibility(s(), s({ repeats: 5 })), /tekrar sayıları farklı/);
+  assert.throws(() => compatibility(s(), s({ taskVersions: { a: { split: 'frozen', version: 2 } } })), /sürümleri farklı/);
+  assert.throws(() => compatibility(s(), s({ taskVersions: {} })), /taskVersions'ta yok/);
+});
+
+test('karşılaştırılabilirlik: aynı deneme iki kez ya da tekrar sayısını aşan deneme reddedilir', () => {
+  const base = { model: 'm', split: 'frozen', repeats: 3, taskVersions: { a: { split: 'frozen', version: 1 } } };
+  const good = { ...base, tasks: runs('a', [true, true, true]) };
+  assert.throws(() => compatibility(good, { ...base, tasks: [...runs('a', [true, true]), { id: 'a', run: 2, pass: true }] }), /iki kez/);
+  assert.throws(() => compatibility(good, { ...base, tasks: runs('a', [true, true, true, true, true]) }), /aşıyor/);
 });

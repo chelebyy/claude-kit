@@ -25,9 +25,22 @@ function inside(root, p) {
   const r = path.relative(fs.realpathSync(root), fs.realpathSync(p));
   return Boolean(r) && !r.startsWith('..') && !path.isAbsolute(r);
 }
-// Henüz var olmayan bir yolun, verilen klasörün içinde olup olmadığı (yazım düzeyinde).
+// Henüz var olmayabilecek bir yolu, var olan en yakın üst klasörünün gerçek yolu (bağlantılar çözülmüş)
+// üzerinden mutlak yola çevirir: klasöre bir takma ad (symlink, junction) üzerinden verilen yol da aynı
+// gerçek yola çıkar.
+function realish(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  while (!fs.existsSync(cur)) {
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    rest.unshift(path.basename(cur));
+    cur = up;
+  }
+  return path.join(fs.existsSync(cur) ? fs.realpathSync(cur) : cur, ...rest);
+}
 function under(dir, p) {
-  const r = path.relative(path.resolve(dir), path.resolve(p));
+  const r = path.relative(realish(dir), realish(p));
   return !r || (!r.startsWith('..') && !path.isAbsolute(r));
 }
 
@@ -53,7 +66,17 @@ function redactModel(text, model) {
   return text.replace(new RegExp(esc, 'gi'), '[model]');
 }
 
-function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results') }) {
+// Görevin rubriğindeki madde kimlikleri (task.json "claims"); varsa unblind notların tam olarak bu maddeleri
+// taşımasını ister.
+function taskClaims(tasksRoot, id) {
+  let t;
+  try { t = JSON.parse(fs.readFileSync(path.join(tasksRoot, id, 'task.json'), 'utf8')); } catch { return null; }
+  if (!Array.isArray(t.claims)) return null;
+  if (!t.claims.every(c => typeof c === 'string' && SLUG_RE.test(c))) throw new Error(`${id}: task.json claims geçersiz`);
+  return [...new Set(t.claims)].sort();
+}
+
+function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), tasksRoot = path.join(ROOT, 'tasks') }) {
   if (!Number.isInteger(seed)) throw new Error('--seed bir tam sayı olmalı');
   if (under(out, key)) throw new Error('anahtar dosyası paket klasörünün içinde olamaz');
   const groups = new Map();
@@ -80,7 +103,10 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results') }
   fs.mkdirSync(out, { recursive: true });
   const rand = rng(seed);
   const items = {};
+  const claims = {};
   for (const id of [...groups.keys()].sort()) {
+    const c = taskClaims(tasksRoot, id);
+    if (c) claims[id] = c;
     fs.mkdirSync(path.join(out, id));
     shuffle(groups.get(id), rand).forEach((e, i) => {
       const L = letter(i);
@@ -88,7 +114,7 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results') }
       items[`${id}/${L}`] = { dir: e.dir, id: e.id, run: e.run, model: e.model, effort: e.effort };
     });
   }
-  fs.writeFileSync(key, JSON.stringify({ seed, items }, null, 2) + '\n', { flag: 'wx' });
+  fs.writeFileSync(key, JSON.stringify({ seed, items, claims }, null, 2) + '\n', { flag: 'wx' });
   return { items: Object.keys(items).length, tasks: groups.size };
 }
 
@@ -125,31 +151,63 @@ function agreement(g1, g2) {
   return { claims: n, agreementRate: po, kappa, disagreements, missing };
 }
 
+const REL_DIR_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
 // Notları anahtarla açar: { "<sonuç klasörü>": { "<görev>#<deneme>": { score, max } } }.
+// Puanlayıcının çıktısı model etkisindeki bir veridir; seçerek eksik bırakılan, uydurulan ya da başka bir
+// hedefe yönlendirilen not kabul edilmez: not dosyası anahtardaki cevapların tamamını, yalnızca onları taşır;
+// her cevabın maddeleri görevin rubrik maddeleriyle (task.json claims) ya da yoksa aynı görevin öteki
+// cevaplarıyla aynıdır; anahtardaki her hedef geçerli ve tektir.
 function unblind(grades, key) {
-  const out = {};
-  for (const [item, g] of Object.entries(grades)) {
+  if (!key || !key.items || typeof key.items !== 'object') throw new Error('anahtar geçersiz');
+  for (const item of Object.keys(grades)) {
     if (!ITEM_RE.test(item)) throw new Error(`${item}: geçersiz cevap adı`);
-    const k = key && key.items && Object.prototype.hasOwnProperty.call(key.items, item) ? key.items[item] : null;
-    if (!k) throw new Error(`${item}: anahtarda yok`);
-    const c = Object.values(claimsOf(g, item));
-    if (!c.length) throw new Error(`${item}: hiç madde yok`);
-    (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: c.filter(Boolean).length, max: c.length };
+    if (!has(key.items, item)) throw new Error(`${item}: anahtarda yok`);
+  }
+  const missing = Object.keys(key.items).filter(item => !has(grades, item));
+  if (missing.length) throw new Error(`not eksik: ${missing.slice(0, 10).join(', ')}`);
+  const targets = new Set();
+  const taskClaimSet = {};
+  const out = {};
+  for (const [item, k] of Object.entries(key.items)) {
+    const m = ITEM_RE.exec(item);
+    if (!m || !k || typeof k.dir !== 'string' || !REL_DIR_RE.test(k.dir) || k.dir.split('/').some(s => s === '.' || s === '..') ||
+        k.id !== m[1] || !Number.isInteger(k.run) || k.run < 1) throw new Error(`${item}: anahtar girdisi geçersiz`);
+    const t = `${k.dir}#${k.id}#${k.run}`;
+    if (targets.has(t)) throw new Error(`${item}: anahtarda aynı hedef iki kez`);
+    targets.add(t);
+    const c = claimsOf(grades[item], item);
+    const names = Object.keys(c).sort();
+    if (!names.length) throw new Error(`${item}: hiç madde yok`);
+    const expected = key.claims && Array.isArray(key.claims[k.id]) ? key.claims[k.id] : taskClaimSet[k.id];
+    if (expected && expected.join('\n') !== names.join('\n')) throw new Error(`${item}: maddeler rubrikle ya da aynı görevin öteki cevaplarıyla aynı değil`);
+    taskClaimSet[k.id] = names;
+    (out[k.dir] || (out[k.dir] = {}))[`${k.id}#${k.run}`] = { score: names.filter(n => c[n]).length, max: names.length };
   }
   return out;
 }
 
 function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results')) {
   if (!SLUG_RE.test(label || '')) throw new Error('--label geçerli bir ad olmalı');
-  const written = [];
+  const plan = [];
   for (const [rel, grades] of Object.entries(byDir)) {
     const dir = path.join(resultsRoot, rel);
     if (!fs.existsSync(dir) || !inside(resultsRoot, dir)) throw new Error(`${rel}: sonuç kökü içinde değil`);
+    // Notlar özetteki ölçülmüş denemelerle birebir eşleşmeli: başka bir göreve ya da denemeye not yazılamaz,
+    // ölçülmüş bir deneme notsuz kalamaz.
+    const s = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8'));
+    const measured = new Set((Array.isArray(s.tasks) ? s.tasks : []).filter(t => t.pass === true || t.pass === false)
+      .map(t => `${t.id}#${t.run === undefined ? 1 : t.run}`));
+    for (const k of Object.keys(grades)) if (!measured.has(k)) throw new Error(`${rel}: ${k} özette ölçülmüş bir deneme değil`);
+    for (const k of measured) if (!has(grades, k)) throw new Error(`${rel}: ${k} için not yok`);
     const f = path.join(dir, `grades-${label}.json`);
-    fs.writeFileSync(f, JSON.stringify(grades, null, 2) + '\n', { flag: 'wx' });
-    written.push(f);
+    if (fs.existsSync(f)) throw new Error(`${rel}: grades-${label}.json zaten var`);
+    plan.push([f, grades]);
   }
-  return written;
+  // Önce hepsi doğrulanır, sonra yazılır: yarım kalan bir açma bazı klasörlere not bırakmasın.
+  for (const [f, grades] of plan) fs.writeFileSync(f, JSON.stringify(grades, null, 2) + '\n', { flag: 'wx' });
+  return plan.map(([f]) => f);
 }
 
 function opt(argv, name) {

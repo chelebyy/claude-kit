@@ -110,3 +110,67 @@ test('anahtarı açma: notlar deneme kimliğine (görev#deneme) ve sonuç klasö
 test('anahtarı açma: anahtarda olmayan bir harf reddedilir', () => {
   assert.throws(() => blind.unblind({ 't1/Z': { claims: { c: true } } }, { items: {} }), /anahtarda yok/);
 });
+
+// --- İnceleme düzeltmeleri (2026-11-27) ---
+
+test('paketleme: paket klasörüne takma ad (bağlantı) üzerinden verilen anahtar yolu da reddedilir', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
+    const out = path.join(root, 'pkg');
+    fs.mkdirSync(out);
+    const alias = path.join(root, 'pkg-alias');
+    fs.symlinkSync(out, alias, 'junction');
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.deepStrictEqual(fs.readdirSync(out), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+function packed(root, answers, claims) {
+  const tasksRoot = path.join(root, 'tasks');
+  if (claims) { fs.mkdirSync(path.join(tasksRoot, 't1'), { recursive: true }); fs.writeFileSync(path.join(tasksRoot, 't1', 'task.json'), JSON.stringify({ id: 't1', claims })); }
+  const a = makeResults(root, 'r-a', 'gpt-x', answers);
+  const key = path.join(root, 'key.json');
+  blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 3, resultsRoot: root, tasksRoot });
+  return JSON.parse(fs.readFileSync(key, 'utf8'));
+}
+
+test('anahtarı açma: eksik bırakılan cevap, rubrikte olmayan madde ve tutarsız madde kümeleri reddedilir', () => {
+  const root = tmp();
+  try {
+    const k = packed(root, [['t1', 1, 'x'], ['t1', 2, 'y']], ['c1', 'c2']);
+    const items = Object.keys(k.items);
+    const full = Object.fromEntries(items.map(i => [i, { claims: { c1: true, c2: false } }]));
+    assert.doesNotThrow(() => blind.unblind(full, k));
+    assert.throws(() => blind.unblind({ [items[0]]: full[items[0]] }, k), /not eksik/);
+    assert.throws(() => blind.unblind({ ...full, [items[0]]: { claims: { invented: true } } }, k), /rubrik/);
+    const k2 = { ...k, claims: {} };
+    assert.throws(() => blind.unblind({ ...full, [items[1]]: { claims: { c1: true } } }, k2), /öteki cevaplarıyla/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('anahtarı açma: başka klasöre, başka göreve yönlendiren ya da aynı hedefi iki kez veren anahtar reddedilir', () => {
+  const root = tmp();
+  try {
+    const k = packed(root, [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    const items = Object.keys(k.items);
+    const g = Object.fromEntries(items.map(i => [i, { claims: { c1: true } }]));
+    const mut = (i, v) => ({ ...k, items: { ...k.items, [items[i]]: { ...k.items[items[i]], ...v } } });
+    assert.throws(() => blind.unblind(g, mut(0, { dir: '../x' })), /anahtar girdisi/);
+    assert.throws(() => blind.unblind(g, mut(0, { id: 'other-task' })), /anahtar girdisi/);
+    assert.throws(() => blind.unblind(g, mut(1, { run: k.items[items[0]].run })), /iki kez/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('notları yazma: özette ölçülmemiş bir denemeye not yazılmaz, eksik not kabul edilmez, hiçbir şey yarım yazılmaz', () => {
+  const root = tmp();
+  try {
+    makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x'], ['t1', 2, 'y']]);
+    makeResults(root, 'r-b', 'gpt-y', [['t1', 1, 'x']]);
+    const ok = { 'r-a': { 't1#1': { score: 1, max: 1 }, 't1#2': { score: 0, max: 1 } } };
+    assert.throws(() => blind.writeGrades({ ...ok, 'r-b': { 't1#9': { score: 1, max: 1 } } }, 'opus', root), /ölçülmüş bir deneme değil/);
+    assert.ok(!fs.existsSync(path.join(root, 'r-a', 'grades-opus.json')), 'yarım yazılmamalı');
+    assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1 } } }, 'opus', root), /için not yok/);
+    assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root).length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

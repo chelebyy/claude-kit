@@ -566,7 +566,12 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
       result.pass = null;
       return result;
     }
-    if (task.check) {
+    if (task.check && result.timedOut) {
+      // Model süreyi aştı: yarım kalmış kod çalıştırılmaz. Deneme ya yinelenir ya da başarısız sayılır
+      // (withTimeoutRetry); her iki durumda da bu kontrolün sonucu kullanılmazdı.
+      result.checkPassed = false;
+      result.checkNotRun = 'model timed out';
+    } else if (task.check) {
       // Kontrol modelin yazdığı kodu yükler; bu yüzden yalıtılmış çalışır (runCheck).
       // Korunan dosyalar değiştiyse hiç çalıştırılmaz.
       if (result.protectedOk === false) {
@@ -639,12 +644,27 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
 
 // Aynı gün aynı model ve eforla yapılmış önceki çalıştırmanın summary.json'undaki görev sonuçlarını
 // döndürür (sonuç klasörü aynıdır). Katman ya da cyber programı farklıysa karıştırmamak için durur.
-function previousResults(outDir, a) {
+function previousResults(outDir, a, taskVersions) {
   const f = path.join(outDir, 'summary.json');
   let s;
   try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; }
   if (s.model !== a.model || s.effort !== a.effort || s.tier !== a.tier || (s.cyberAccessProgram || null) !== (a.cyber || null)) {
     throw new Error(`${path.basename(outDir)}/summary.json başka bir çalıştırmaya ait (katman ya da cyber programı farklı); klasörü taşıyıp yeniden çalıştır`);
+  }
+  // Tekrar sayısı, bölüm ve görev sürümleri de aynı olmalı: farklı bir çalıştırmanın denemeleri (fazladan
+  // tekrarlar, başka bölümün ya da eski sürümün görevleri) yeni özete karışmasın. run alanı olmayan eski
+  // özetler 1 tekrar ve bölümsüz sayılır.
+  const old = { repeats: s.repeats === undefined ? 1 : s.repeats, split: s.split || null };
+  if (old.repeats !== (a.repeats || 1) || old.split !== (a.split || null)) {
+    throw new Error(`${path.basename(outDir)}/summary.json başka bir çalıştırmaya ait (tekrar sayısı ya da bölüm farklı); klasörü taşıyıp yeniden çalıştır`);
+  }
+  if (taskVersions && s.taskVersions) {
+    for (const [id, v] of Object.entries(taskVersions)) {
+      const o = s.taskVersions[id];
+      if (o && (o.version !== v.version || o.split !== v.split)) {
+        throw new Error(`${path.basename(outDir)}/summary.json: ${id} görevinin başka bir sürümüne ait; klasörü taşıyıp yeniden çalıştır`);
+      }
+    }
   }
   return Array.isArray(s.tasks) ? s.tasks : [];
 }
@@ -672,11 +692,16 @@ function summaryTotal(results, tasks, repeats = 1) {
 // Zaman aşımıyla birlikte kural ihlali varsa (salt okunur, korunan dosya, bırakılan bağlantı) yeniden
 // çalıştırılmaz, başarısızlık kalır. Kontrol komutunun zaman aşımı (checkTimedOut: modelin kodu takıldı)
 // bu kurala girmez. İlk denemenin sonucu timeoutRetries altında kalır; cevap dosyası son denemenindir.
-const isRuleViolation = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true;
-function withTimeoutRetry(runOnce) {
+// Kontrolün zaman aşımı ya da bütünlük denetimine takılması (checkSkipped) da modelin sonucudur; zaman
+// aşımıyla gelse de deneme yinelenmez. Modelin süreyi aştığı denemede kontrol hiç çalıştırılmaz (checkNotRun).
+const isRuleViolation = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true ||
+  r.checkTimedOut === true || Boolean(r.checkSkipped);
+function withTimeoutRetry(runOnce, beforeRetry) {
   const first = runOnce();
   if (!first.timedOut || isRuleViolation(first)) return first;
   const firstAttempt = { ...first, pass: null, timeoutUnmeasured: true };
+  // İlk denemenin cevap ve tanı dosyaları yeniden denemenin üstüne yazmasın diye saklanır.
+  if (beforeRetry) beforeRetry();
   const second = runOnce();
   if (second.timedOut) return { ...second, pass: false, timedOutTwice: true, timeoutRetries: [firstAttempt] };
   return { ...second, timeoutRetries: [firstAttempt] };
@@ -712,10 +737,10 @@ function main() {
   const roleIssue = securityRoleProblem(a, tasks, loadRegistry());
   if (roleIssue) throw new Error(roleIssue);
   const stamp = new Date().toISOString().slice(0, 10);
-  const outDir = path.join(ROOT, 'results', `${stamp}-${a.model}-${a.effort}${a.cyber ? `-${a.cyber}` : ''}`);
+  const outDir = path.join(ROOT, 'results', `${stamp}-${a.model}-${a.effort}${a.cyber ? `-${a.cyber}` : ''}${a.split ? `-${a.split}` : ''}`);
   if (!a.dryRun) fs.mkdirSync(outDir, { recursive: true });
-  let results = a.dryRun ? [] : previousResults(outDir, a);
   const taskVersions = Object.fromEntries(tasks.map(t => [t.id, { split: t.split || null, version: t.version || null }]));
+  let results = a.dryRun ? [] : previousResults(outDir, a, taskVersions);
   const summarize = () => ({ model: a.model, effort: a.effort, tier: a.tier, cyberAccessProgram: a.cyber || null, date: stamp,
     repeats: a.repeats, split: a.split || null, taskVersions, tasks: results,
     passed: results.filter(r => r.pass === true).length,
@@ -727,7 +752,13 @@ function main() {
       const task = { ...t, run: k };
       // Sonuçlar depoya kanıt olarak girer: yerel yollar (leftoverDir, hata mesajları) yer tutucuyla.
       // --dry-run hiçbir şey yazmaz; gösterdiği komut çalıştırılabilsin diye olduğu gibi kalır.
-      const r = a.dryRun ? evaluate(a, task, outDir) : withTimeoutRetry(() => evaluate(a, task, outDir));
+      const keepFirst = () => {
+        for (const ext of ['.md', '.stderr.txt']) {
+          const f = path.join(outDir, `${answerStem(task)}${ext}`);
+          if (fs.existsSync(f)) fs.renameSync(f, path.join(outDir, `${answerStem(task)}.timeout1${ext}`));
+        }
+      };
+      const r = a.dryRun ? evaluate(a, task, outDir) : withTimeoutRetry(() => evaluate(a, task, outDir), keepFirst);
       results = mergeResult(results, a.dryRun ? r : redactDeep(r));
       // Her denemeden sonra yaz: sonraki bir deneme çökerse harcanan kotanın sonucu kaybolmasın.
       if (!a.dryRun) fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summarize(), null, 2) + '\n');

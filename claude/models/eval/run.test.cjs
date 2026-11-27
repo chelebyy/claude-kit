@@ -902,3 +902,51 @@ test('görev seti bölümü: --split yalnızca o bölümdeki görevleri yükler;
     assert.ok(!got.some(t => legacy.includes(t.id)));
   }
 });
+
+// --- İnceleme düzeltmeleri (2026-11-27) ---
+
+test('zaman aşımı kuralı: kontrol zaman aşımı ya da kontrol klasörü denetimiyle gelen zaman aşımı yinelenmez', () => {
+  for (const v of [{ checkTimedOut: true }, { checkSkipped: 'work dir changed after the model run: x' }]) {
+    let calls = 0;
+    const r = runModule.withTimeoutRetry(() => { calls++; return { id: 't', timedOut: true, pass: false, ...v }; });
+    assert.strictEqual(calls, 1, JSON.stringify(v));
+    assert.strictEqual(r.pass, false);
+  }
+});
+
+test('zaman aşımı kuralı: ilk denemenin dosyaları yeniden denemeden önce saklanır', () => {
+  const order = [];
+  runModule.withTimeoutRetry(() => { order.push('run'); return { id: 't', timedOut: order.length === 1, pass: true }; }, () => order.push('keep'));
+  assert.deepStrictEqual(order, ['run', 'keep', 'run']);
+});
+
+test('süreyi aşan modelin düzeltme görevinde kontrol çalıştırılmaz', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  process.env.FAKE_MODE = 'sandbox-claim-then-hang';
+  try {
+    const r = evaluate(args, { ...load('fix-pagination'), timeoutSec: 2, run: 1 }, outDir);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.checkNotRun, 'model timed out');
+    assert.strictEqual(r.checkPassed, false);
+    assert.strictEqual(r.pass, false);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('aynı gün tekrar: farklı tekrar sayısı, bölüm ya da görev sürümüyle yapılmış özete karışmaz', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const a = { model: 'gpt-x', effort: 'high', tier: 'default', repeats: 3, split: 'frozen' };
+  const write = s => fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({ model: 'gpt-x', effort: 'high', tier: 'default', cyberAccessProgram: null, tasks: [], ...s }));
+  try {
+    write({ repeats: 5, split: 'frozen' });
+    assert.throws(() => runModule.previousResults(outDir, a), /tekrar sayısı ya da bölüm/);
+    write({ repeats: 3, split: 'dev' });
+    assert.throws(() => runModule.previousResults(outDir, a), /tekrar sayısı ya da bölüm/);
+    write({ repeats: 3, split: 'frozen', taskVersions: { t: { split: 'frozen', version: 1 } } });
+    assert.throws(() => runModule.previousResults(outDir, a, { t: { split: 'frozen', version: 2 } }), /başka bir sürümüne/);
+    assert.deepStrictEqual(runModule.previousResults(outDir, a, { t: { split: 'frozen', version: 1 } }), []);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
