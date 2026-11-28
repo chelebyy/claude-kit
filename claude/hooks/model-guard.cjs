@@ -327,7 +327,7 @@ function invocations(rawCommand, shell = 'bash', depth = 0, out = [], visited = 
     const textTool = words.length > 0 && TEXT_TOOLS.has(baseName(words[0]));
     for (let i = 0; i < words.length; i++) {
       const name = baseName(words[i]);
-      const nested = textTool ? undefined : NESTED_SHELLS[name];
+      const nested = textTool || !Object.prototype.hasOwnProperty.call(NESTED_SHELLS, name) ? undefined : NESTED_SHELLS[name];
       if (nested) {
         if (seen[nested]) continue;
         seen[nested] = true;
