@@ -206,8 +206,14 @@ function claudeUsage(j) {
   };
 }
 
+// Aday kullanıcının Codex ayarları olmadan çalışır: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
+// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları yüklenmez. Kullanıcı ayarı yok
+// sayıldığı için Windows sandbox kipi ve workspace-write ağ kapalılığı açıkça verilir.
+const CODEX_ISOLATION = ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
+  ...(IS_WIN ? ['-c', 'windows.sandbox="unelevated"'] : []), '-c', 'sandbox_workspace_write.network_access=false'];
+
 function codexArgs(a, task, dir, lastMsgFile) {
-  return ['exec', '-m', a.model,
+  return ['exec', '-m', a.model, ...CODEX_ISOLATION,
     '-c', `model_reasoning_effort="${a.effort}"`, '-c', `service_tier="${a.tier}"`,
     '-s', task.sandbox, '-C', dir, '--skip-git-repo-check', '--ephemeral', '--json',
     ...(a.cyber ? ['--cyber-access-program', a.cyber] : []),

@@ -431,6 +431,19 @@ test('--cyber-access-program doğrulanır ve codex exec komutuna geçer', () => 
   }
 });
 
+test('Codex adayı kullanıcının Codex ayarları (MCP, plugin, hook, kural) olmadan çalışır', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    const cmd = evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
+    for (const flag of ['--ignore-user-config', '--ignore-rules', '--disable apps', '--disable plugins', '-c sandbox_workspace_write.network_access=false']) {
+      assert.ok(cmd.includes(` ${flag} `), `eksik: ${flag}`);
+    }
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('kaydedilen cevapta yerel yollar (kullanıcı adı) yer tutucuyla değişir', () => {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
   process.env.FAKE_MODE = 'fix-mentions-paths';
