@@ -41,6 +41,8 @@ function parseArgs(argv) {
     else if (k === '--repeats') a.repeats = argv[++i];
     else if (k === '--tasks') a.tasksDir = argv[++i];
     else if (k === '--results') a.resultsDir = argv[++i];
+    else if (k === '--codex-windows-sandbox') a.codexWindowsSandbox = argv[++i];
+    else if (k === '--codex-auth-store') a.codexAuthStore = argv[++i];
     else throw new Error(`bilinmeyen argüman: ${k}`);
   }
   if (a.split !== undefined && !SPLITS.has(a.split)) throw new Error('--split: dev|frozen');
@@ -57,7 +59,7 @@ function parseArgs(argv) {
   a.provider = a.model.startsWith('claude-') ? 'claude' : 'codex';
   if (a.provider === 'claude') {
     if (!CLAUDE_EFFORTS.has(a.effort)) throw new Error('--effort (Claude): low|medium|high|xhigh|max');
-    if (a.tier !== undefined || a.cyber !== undefined) throw new Error('Claude modellerinde --tier ve --cyber-access-program kullanılmaz');
+    if (a.tier !== undefined || a.cyber !== undefined || a.codexWindowsSandbox !== undefined || a.codexAuthStore !== undefined) throw new Error('Claude modellerinde --tier, --cyber-access-program ve --codex-* seçenekleri kullanılmaz');
     if (a.task !== undefined && !SLUG_RE.test(a.task)) throw new Error('--task geçerli bir görev kimliği olmalı');
     return a;
   }
@@ -67,6 +69,8 @@ function parseArgs(argv) {
   // Daybreak modellerinin fast katmanı yok; cyber programı yalnızca default katmanla denenir.
   if (a.cyber !== undefined && a.tier !== 'default') throw new Error('--cyber-access-program yalnızca --tier default ile kullanılır');
   if (a.task !== undefined && !SLUG_RE.test(a.task)) throw new Error('--task geçerli bir görev kimliği olmalı');
+  if (a.codexWindowsSandbox !== undefined && !WIN_SANDBOXES.includes(a.codexWindowsSandbox)) throw new Error('--codex-windows-sandbox: elevated|unelevated');
+  if (a.codexAuthStore !== undefined && !AUTH_STORES.includes(a.codexAuthStore)) throw new Error('--codex-auth-store: file|keyring|auto|ephemeral');
   return a;
 }
 
@@ -207,39 +211,40 @@ function claudeUsage(j) {
 }
 
 // Aday kullanıcının Codex ayarları olmadan başlar: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
-// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları oturuma yüklenmez. Kullanıcı ayarı
-// yok sayıldığı için iki ayar oradan aynen taşınır: Windows sandbox kipi (kullanıcıda elevated varsa
-// düşürülmez; yoksa unelevated) ve giriş bilgilerinin nerede saklandığı (keyring ile girişte aday kimlik
-// doğrulayabilsin). Ağ, workspace-write'ta açıkça kapalıdır. Bu bir güvenlik sınırı değildir: sandbox okumayı
-// kısıtlamadığı için kasıtlı bir aday kullanıcının dosyalarını okuyup kendi codex sürecini başlatabilir
-// (README "Bilinen sınırlar").
-function userCodexSetting(table, key, allowed) {
-  const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  let text;
-  try { text = fs.readFileSync(path.join(home, 'config.toml'), 'utf8'); } catch { return null; }
-  let current = '';
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.replace(/\s+#.*$/, '').trim();
-    const t = /^\[([^\]]+)\]$/.exec(line);
-    if (t) { current = t[1].trim(); continue; }
-    const m = /^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"$/.exec(line);
-    if (m && current === table && m[1] === key) return allowed.includes(m[2]) ? m[2] : null;
-  }
-  return null;
+// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları oturuma yüklenmez. Kullanıcı ayarı yok
+// sayıldığında kaybolan iki değer kullanıcının ayarından okunmaz (ayar dosyası tam TOML'dur, burada ayrıştırılmaz),
+// açık seçenekle verilir: Windows sandbox kipi (--codex-windows-sandbox, varsayılan unelevated) ve giriş
+// bilgilerinin deposu (--codex-auth-store). Sessizce yanlış değer seçilmesin diye, kullanıcı ayarında "elevated"
+// değeri ya da cli_auth_credentials_store anahtarı herhangi bir biçimde geçiyorsa ilgili seçenek zorunludur.
+// Ortam değişkenlerinden yalnızca temel olanlar kabuğa geçer; ağ workspace-write'ta kapalıdır. Bu bir güvenlik
+// sınırı değildir: sandbox okumayı kısıtlamadığı için kasıtlı bir aday kullanıcının dosyalarını okuyup kendi
+// codex sürecini başlatabilir (README "Bilinen sınırlar").
+const WIN_SANDBOXES = ['elevated', 'unelevated'];
+const AUTH_STORES = ['file', 'keyring', 'auto', 'ephemeral'];
+function userCodexConfigText() {
+  let home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  try { home = fs.realpathSync(home); } catch { /* yoksa ayar da yoktur */ }
+  try { return fs.readFileSync(path.join(home, 'config.toml'), 'utf8'); } catch { return ''; }
 }
-function codexIsolation() {
-  const store = userCodexSetting('', 'cli_auth_credentials_store', ['file', 'keyring', 'auto', 'ephemeral']);
-  const winSandbox = userCodexSetting('windows', 'sandbox', ['elevated', 'unelevated']) || 'unelevated';
+function codexIsolation(a) {
+  const cfg = userCodexConfigText();
+  const mentionsElevated = /(^|[^a-z_])elevated\b/i.test(cfg.replace(/unelevated/gi, ''));
+  if (IS_WIN && a.codexWindowsSandbox === undefined && mentionsElevated) {
+    throw new Error('Codex ayarında "elevated" geçiyor: sandbox kipini --codex-windows-sandbox elevated|unelevated ile açıkça ver');
+  }
+  if (a.codexAuthStore === undefined && /cli_auth_credentials_store/.test(cfg)) {
+    throw new Error('Codex ayarında cli_auth_credentials_store geçiyor: giriş deposunu --codex-auth-store file|keyring|auto|ephemeral ile açıkça ver');
+  }
   return ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
-    ...(IS_WIN ? ['-c', `windows.sandbox="${winSandbox}"`] : []),
-    ...(store ? ['-c', `cli_auth_credentials_store="${store}"`] : []),
+    ...(IS_WIN ? ['-c', `windows.sandbox="${a.codexWindowsSandbox || 'unelevated'}"`] : []),
+    ...(a.codexAuthStore ? ['-c', `cli_auth_credentials_store="${a.codexAuthStore}"`] : []),
     // Ortam değişkenleri: yalnızca temel değişkenler (PATH, HOME vb.) kabuğa geçer; Codex'in varsayılanı hepsini geçirir.
     '-c', 'shell_environment_policy.inherit="core"',
     '-c', 'sandbox_workspace_write.network_access=false'];
 }
 
 function codexArgs(a, task, dir, lastMsgFile) {
-  return ['exec', '-m', a.model, ...codexIsolation(),
+  return ['exec', '-m', a.model, ...codexIsolation(a),
     '-c', `model_reasoning_effort="${a.effort}"`, '-c', `service_tier="${a.tier}"`,
     '-s', task.sandbox, '-C', dir, '--skip-git-repo-check', '--ephemeral', '--json',
     ...(a.cyber ? ['--cyber-access-program', a.cyber] : []),
@@ -1104,6 +1109,7 @@ function main() {
   const a = parseArgs(process.argv.slice(2));
   const tasks = loadTasks(a.task, a.split, a.tasksDir);
   if (!tasks.length) throw new Error('görev bulunamadı');
+  if (a.provider === 'codex') codexIsolation(a); // ayar seçenekleri eksikse hiçbir deneme başlamadan dur
   const roleIssue = securityRoleProblem(a, tasks, loadRegistry());
   if (roleIssue) throw new Error(roleIssue);
   const stamp = new Date().toISOString().slice(0, 10);
@@ -1157,5 +1163,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, copyHidden, runChecks, verifyData, readResultsFile, jsonShapeProblem, unifiedDiff, changesPatch, HIDDEN_DIR, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { codexIsolation, securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, copyHidden, runChecks, verifyData, readResultsFile, jsonShapeProblem, unifiedDiff, changesPatch, HIDDEN_DIR, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }

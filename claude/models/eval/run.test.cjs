@@ -202,6 +202,10 @@ test('kontrol klasörünün üstünde .codex varsa kontrol çalışmaz', () => {
 
 // Gerçek `codex sandbox` (codex kurulu değilse atlanır; model çağrılmaz).
 const runModule = require('./run.cjs');
+// Testler kullanıcının gerçek Codex ayarına (~/.codex/config.toml) bağlı olmasın: boş bir CODEX_HOME.
+const TEST_CODEX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
+process.env.CODEX_HOME = TEST_CODEX_HOME;
+process.on('exit', () => fs.rmSync(TEST_CODEX_HOME, { recursive: true, force: true }));
 let realCodex = null;
 try { realCodex = runModule.codexCommand(); } catch {}
 
@@ -433,37 +437,55 @@ test('--cyber-access-program doğrulanır ve codex exec komutuna geçer', () => 
 
 test('Codex adayı kullanıcının Codex ayarları (MCP, plugin, hook, kural) olmadan çalışır', () => {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
+  const prev = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
   try {
     const cmd = evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
     for (const flag of ['--ignore-user-config', '--ignore-rules', '--disable apps', '--disable plugins', '-c shell_environment_policy.inherit="core"', '-c sandbox_workspace_write.network_access=false']) {
       assert.ok(cmd.includes(` ${flag} `), `eksik: ${flag}`);
     }
-    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="(un)?elevated" /);
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
   } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
     fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('Codex adayına kullanıcı ayarından yalnızca sandbox kipi ve giriş deposu taşınır', () => {
+test('Codex adayı: sandbox kipi ve giriş deposu kullanıcı ayarından okunmaz, belirsizse açık seçenek istenir', () => {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
   const prev = process.env.CODEX_HOME;
-  const cmdWith = toml => {
+  const cmdWith = (toml, extra = {}) => {
     fs.writeFileSync(path.join(home, 'config.toml'), toml);
-    return evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
+    return evaluate({ ...args, ...extra, dryRun: true }, load('fix-pagination'), outDir).command;
   };
   try {
     process.env.CODEX_HOME = home;
-    let cmd = cmdWith('cli_auth_credentials_store = "keyring"\n[mcp_servers.x]\ncommand = "evil"\n[windows]\nsandbox = "elevated" # yorum\n');
-    assert.match(cmd, / -c cli_auth_credentials_store="keyring" /);
-    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="elevated" /);
-    assert.ok(!cmd.includes('evil'));
-    // Tanınmayan değer ya da başka tablodaki aynı ad taşınmaz; Windows'ta kip unelevated'a düşer.
-    cmd = cmdWith('[other]\ncli_auth_credentials_store = "keyring"\n[windows]\nsandbox = "none"\n');
-    assert.ok(!cmd.includes('cli_auth_credentials_store'));
+    // Sorunsuz ayar: varsayılan kip, giriş deposu verilmez; MCP tanımı komuta taşınmaz.
+    let cmd = cmdWith('[mcp_servers.x]\ncommand = "evil"\n[windows]\nsandbox = "unelevated"\n');
+    assert.ok(!cmd.includes('evil') && !cmd.includes('cli_auth_credentials_store'));
     if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
-    cmd = cmdWith('cli_auth_credentials_store = "keyring\\" -c x"\n');
-    assert.ok(!cmd.includes('cli_auth_credentials_store'));
+    // Ayarda "elevated" hangi biçimde geçerse geçsin (tek tırnak, çok satırlı metin, yorum) kip açıkça istenir.
+    for (const toml of ["[windows]\nsandbox = 'elevated'\n", 'x = """\n[windows]\nsandbox = "elevated"\n"""\n', '# back to "elevated" later\n']) {
+      fs.writeFileSync(path.join(home, 'config.toml'), toml);
+      if (process.platform === 'win32') assert.throws(() => runModule.codexIsolation({}), /--codex-windows-sandbox/);
+    }
+    cmd = cmdWith("[windows]\nsandbox = 'elevated'\n", { codexWindowsSandbox: 'elevated' });
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="elevated" /);
+    // Giriş deposu anahtarı geçiyorsa (hangi değerle olursa olsun) depo açıkça istenir.
+    fs.writeFileSync(path.join(home, 'config.toml'), "cli_auth_credentials_store = 'keyring'\n");
+    assert.throws(() => runModule.codexIsolation({}), /--codex-auth-store/);
+    // Çalıştırıcı bu durumda deneme başlatmaz: dry-run sonucu komut yerine hata taşır.
+    assert.ok(!evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command);
+    cmd = cmdWith("cli_auth_credentials_store = 'keyring'\n", { codexAuthStore: 'keyring' });
+    assert.match(cmd, / -c cli_auth_credentials_store="keyring" /);
+    // Seçenek değerleri izin listesinden.
+    const base = ['--model', 'gpt-6.1-terra', '--effort', 'medium', '--tier', 'fast'];
+    assert.throws(() => runModule.parseArgs([...base, '--codex-windows-sandbox', 'none']), /elevated\|unelevated/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-auth-store', 'x" -c y']), /file\|keyring/);
+    assert.throws(() => runModule.parseArgs(['--model', 'claude-haiku-5-5', '--effort', 'medium', '--codex-auth-store', 'file']), /--codex-/);
   } finally {
     if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
     fs.rmSync(outDir, { recursive: true, force: true });
