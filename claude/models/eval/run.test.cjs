@@ -18,7 +18,7 @@ const load = id => ({
   base: path.join(tasksDir, id),
   prompt: fs.readFileSync(path.join(tasksDir, id, 'prompt.md'), 'utf8'),
 });
-const args = { model: 'fake', effort: 'low', tier: 'fast', dryRun: false };
+const args = { model: 'fake', effort: 'low', tier: 'fast', codexWindowsSandbox: 'unelevated', dryRun: false };
 
 function runMode(mode, id) {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
@@ -416,7 +416,7 @@ test('sandbox açılamazsa sonuç ölçülmemiş sayılır', () => {
 
 test('--cyber-access-program doğrulanır ve codex exec komutuna geçer', () => {
   const base = ['--model', 'gpt-daybreak-blue-latest', '--effort', 'high'];
-  const a = runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak_blue']);
+  const a = runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak_blue', '--codex-windows-sandbox', 'unelevated']);
   assert.strictEqual(a.cyber, 'daybreak_blue');
   assert.throws(() => runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak']), /standard\|daybreak_blue\|daybreak_red/);
   assert.throws(() => runModule.parseArgs([...base, '--tier', 'fast', '--cyber-access-program', 'daybreak_blue']), /--tier default/);
@@ -428,6 +428,60 @@ test('--cyber-access-program doğrulanır ve codex exec komutuna geçer', () => 
     assert.ok(!without.includes('--cyber-access-program'));
   } finally {
     fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('Codex adayı kullanıcının Codex ayarları (MCP, plugin, hook, kural) olmadan çalışır', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
+  const prev = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    const cmd = evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
+    for (const flag of ['--ignore-user-config', '--ignore-rules', '--disable apps', '--disable plugins', '-c shell_environment_policy.inherit="core"', '-c sandbox_workspace_write.network_access=false']) {
+      assert.ok(cmd.includes(` ${flag} `), `eksik: ${flag}`);
+    }
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('Codex adayı: sandbox kipi ve giriş deposu ayar dosyasından okunmaz, seçenekle verilir', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
+  const prev = process.env.CODEX_HOME;
+  try {
+    process.env.CODEX_HOME = home;
+    // Ayar dosyası ne derse desin (kaçışlı "elevated", MCP tanımı, giriş deposu) komuta yalnızca seçenekler girer.
+    const escaped = 'sandbox = "' + String.fromCharCode(92) + 'u0065levated"';
+    fs.writeFileSync(path.join(home, 'config.toml'), 'cli_auth_credentials_store = "keyring"\n[mcp_servers.x]\ncommand = "evil"\n[windows]\n' + escaped + '\n');
+    let cmd = evaluate({ ...args, codexWindowsSandbox: 'elevated', dryRun: true }, load('fix-pagination'), outDir).command;
+    assert.ok(!cmd.includes('evil') && !cmd.includes('cli_auth_credentials_store'));
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="elevated" /);
+    cmd = evaluate({ ...args, codexAuthStore: 'keyring', dryRun: true }, load('fix-pagination'), outDir).command;
+    assert.match(cmd, / -c cli_auth_credentials_store="keyring" /);
+    if (process.platform === 'win32') {
+      // Windows'ta kip zorunlu: verilmezse deneme başlamaz (dry-run komut yerine hata taşır).
+      assert.throws(() => runModule.codexIsolation({}), /--codex-windows-sandbox/);
+      const noMode = { ...args, dryRun: true };
+      delete noMode.codexWindowsSandbox;
+      assert.ok(!evaluate(noMode, load('fix-pagination'), outDir).command);
+    }
+    // Seçenek değerleri izin listesinden; değersiz seçenek reddedilir.
+    const base = ['--model', 'gpt-6.1-terra', '--effort', 'medium', '--tier', 'fast'];
+    assert.strictEqual(runModule.parseArgs([...base, '--codex-windows-sandbox', 'unelevated']).codexWindowsSandbox, 'unelevated');
+    assert.throws(() => runModule.parseArgs([...base, '--codex-windows-sandbox', 'none']), /elevated\|unelevated/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-auth-store', 'x" -c y']), /file\|keyring/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-windows-sandbox']), /bir değer ister/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-auth-store', '--split', 'dev']), /bir değer ister/);
+    assert.throws(() => runModule.parseArgs(['--model', 'claude-haiku-5-5', '--effort', 'medium', '--codex-auth-store', 'file']), /--codex-/);
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

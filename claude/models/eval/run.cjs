@@ -41,6 +41,11 @@ function parseArgs(argv) {
     else if (k === '--repeats') a.repeats = argv[++i];
     else if (k === '--tasks') a.tasksDir = argv[++i];
     else if (k === '--results') a.resultsDir = argv[++i];
+    else if (k === '--codex-windows-sandbox' || k === '--codex-auth-store') {
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) throw new Error(`${k} bir değer ister`);
+      a[k === '--codex-auth-store' ? 'codexAuthStore' : 'codexWindowsSandbox'] = v;
+    }
     else throw new Error(`bilinmeyen argüman: ${k}`);
   }
   if (a.split !== undefined && !SPLITS.has(a.split)) throw new Error('--split: dev|frozen');
@@ -57,7 +62,7 @@ function parseArgs(argv) {
   a.provider = a.model.startsWith('claude-') ? 'claude' : 'codex';
   if (a.provider === 'claude') {
     if (!CLAUDE_EFFORTS.has(a.effort)) throw new Error('--effort (Claude): low|medium|high|xhigh|max');
-    if (a.tier !== undefined || a.cyber !== undefined) throw new Error('Claude modellerinde --tier ve --cyber-access-program kullanılmaz');
+    if (a.tier !== undefined || a.cyber !== undefined || a.codexWindowsSandbox !== undefined || a.codexAuthStore !== undefined) throw new Error('Claude modellerinde --tier, --cyber-access-program ve --codex-* seçenekleri kullanılmaz');
     if (a.task !== undefined && !SLUG_RE.test(a.task)) throw new Error('--task geçerli bir görev kimliği olmalı');
     return a;
   }
@@ -67,6 +72,8 @@ function parseArgs(argv) {
   // Daybreak modellerinin fast katmanı yok; cyber programı yalnızca default katmanla denenir.
   if (a.cyber !== undefined && a.tier !== 'default') throw new Error('--cyber-access-program yalnızca --tier default ile kullanılır');
   if (a.task !== undefined && !SLUG_RE.test(a.task)) throw new Error('--task geçerli bir görev kimliği olmalı');
+  if (a.codexWindowsSandbox !== undefined && !WIN_SANDBOXES.includes(a.codexWindowsSandbox)) throw new Error('--codex-windows-sandbox: elevated|unelevated');
+  if (a.codexAuthStore !== undefined && !AUTH_STORES.includes(a.codexAuthStore)) throw new Error('--codex-auth-store: file|keyring|auto|ephemeral');
   return a;
 }
 
@@ -206,8 +213,30 @@ function claudeUsage(j) {
   };
 }
 
+// Aday kullanıcının Codex ayarları olmadan başlar: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
+// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları oturuma yüklenmez. Kullanıcı ayarı yok
+// sayılınca kaybolan iki değer ayar dosyasından okunmaz (tam TOML'dur; tahmin sessizce yanlış değer seçebilir),
+// seçenekle verilir: Windows'ta sandbox kipi zorunludur (--codex-windows-sandbox elevated|unelevated), giriş
+// bilgilerinin deposu isteğe bağlıdır (--codex-auth-store; verilmezse Codex auth.json dosyasını okur, giriş
+// başarısız olursa deneme ölçülmemiş sayılır). Ortam değişkenlerinden yalnızca temel olanlar kabuğa geçer; ağ
+// workspace-write'ta kapalıdır. Bu bir güvenlik sınırı değildir: sandbox okumayı kısıtlamadığı için kasıtlı bir aday
+// kullanıcının dosyalarını okuyup kendi codex sürecini başlatabilir (README "Bilinen sınırlar").
+const WIN_SANDBOXES = ['elevated', 'unelevated'];
+const AUTH_STORES = ['file', 'keyring', 'auto', 'ephemeral'];
+function codexIsolation(a) {
+  if (IS_WIN && !WIN_SANDBOXES.includes(a.codexWindowsSandbox)) {
+    throw new Error("Windows'ta Codex sandbox kipini açıkça ver: --codex-windows-sandbox elevated|unelevated (kullanıcının config.toml'undaki [windows] sandbox değeri)");
+  }
+  return ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
+    ...(IS_WIN ? ['-c', `windows.sandbox="${a.codexWindowsSandbox}"`] : []),
+    ...(a.codexAuthStore ? ['-c', `cli_auth_credentials_store="${a.codexAuthStore}"`] : []),
+    // Ortam değişkenleri: yalnızca temel değişkenler (PATH, HOME vb.) kabuğa geçer; Codex'in varsayılanı hepsini geçirir.
+    '-c', 'shell_environment_policy.inherit="core"',
+    '-c', 'sandbox_workspace_write.network_access=false'];
+}
+
 function codexArgs(a, task, dir, lastMsgFile) {
-  return ['exec', '-m', a.model,
+  return ['exec', '-m', a.model, ...codexIsolation(a),
     '-c', `model_reasoning_effort="${a.effort}"`, '-c', `service_tier="${a.tier}"`,
     '-s', task.sandbox, '-C', dir, '--skip-git-repo-check', '--ephemeral', '--json',
     ...(a.cyber ? ['--cyber-access-program', a.cyber] : []),
@@ -1072,6 +1101,7 @@ function main() {
   const a = parseArgs(process.argv.slice(2));
   const tasks = loadTasks(a.task, a.split, a.tasksDir);
   if (!tasks.length) throw new Error('görev bulunamadı');
+  if (a.provider === 'codex') codexIsolation(a); // ayar seçenekleri eksikse hiçbir deneme başlamadan dur
   const roleIssue = securityRoleProblem(a, tasks, loadRegistry());
   if (roleIssue) throw new Error(roleIssue);
   const stamp = new Date().toISOString().slice(0, 10);
@@ -1125,5 +1155,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, copyHidden, runChecks, verifyData, readResultsFile, jsonShapeProblem, unifiedDiff, changesPatch, HIDDEN_DIR, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { codexIsolation, securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, copyHidden, runChecks, verifyData, readResultsFile, jsonShapeProblem, unifiedDiff, changesPatch, HIDDEN_DIR, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }
