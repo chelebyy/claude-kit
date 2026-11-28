@@ -8,6 +8,14 @@
     "retired": "Was approved or available before; replaced. Do not use it for a role."
   },
   "codex": {
+    "gpt-6.2-astra": {
+      "status": "candidate",
+      "note": "Seen in the Codex catalog on 2026-11-28. Candidate for the frontier role against gpt-6-astra (high, default tier), on the frozen split after the task set is hardened (BACKLOG item 9). Vendor description is not evidence."
+    },
+    "gpt-6.2-sol": {
+      "status": "candidate",
+      "note": "Seen in the Codex catalog on 2026-11-28. Candidate for the workhorse role against gpt-6.1-sol (xhigh, fast tier), on the frozen split after the task set is hardened (BACKLOG item 9). Vendor description is not evidence."
+    },
     "gpt-6.1-sol": {
       "status": "approved",
       "role": "workhorse",
