@@ -435,12 +435,39 @@ test('Codex adayı kullanıcının Codex ayarları (MCP, plugin, hook, kural) ol
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
   try {
     const cmd = evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
-    for (const flag of ['--ignore-user-config', '--ignore-rules', '--disable apps', '--disable plugins', '-c sandbox_workspace_write.network_access=false']) {
+    for (const flag of ['--ignore-user-config', '--ignore-rules', '--disable apps', '--disable plugins', '-c shell_environment_policy.inherit="core"', '-c sandbox_workspace_write.network_access=false']) {
       assert.ok(cmd.includes(` ${flag} `), `eksik: ${flag}`);
     }
-    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="(un)?elevated" /);
   } finally {
     fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('Codex adayına kullanıcı ayarından yalnızca sandbox kipi ve giriş deposu taşınır', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
+  const prev = process.env.CODEX_HOME;
+  const cmdWith = toml => {
+    fs.writeFileSync(path.join(home, 'config.toml'), toml);
+    return evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command;
+  };
+  try {
+    process.env.CODEX_HOME = home;
+    let cmd = cmdWith('cli_auth_credentials_store = "keyring"\n[mcp_servers.x]\ncommand = "evil"\n[windows]\nsandbox = "elevated" # yorum\n');
+    assert.match(cmd, / -c cli_auth_credentials_store="keyring" /);
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="elevated" /);
+    assert.ok(!cmd.includes('evil'));
+    // Tanınmayan değer ya da başka tablodaki aynı ad taşınmaz; Windows'ta kip unelevated'a düşer.
+    cmd = cmdWith('[other]\ncli_auth_credentials_store = "keyring"\n[windows]\nsandbox = "none"\n');
+    assert.ok(!cmd.includes('cli_auth_credentials_store'));
+    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
+    cmd = cmdWith('cli_auth_credentials_store = "keyring\\" -c x"\n');
+    assert.ok(!cmd.includes('cli_auth_credentials_store'));
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

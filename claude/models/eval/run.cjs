@@ -206,14 +206,40 @@ function claudeUsage(j) {
   };
 }
 
-// Aday kullanıcının Codex ayarları olmadan çalışır: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
-// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları yüklenmez. Kullanıcı ayarı yok
-// sayıldığı için Windows sandbox kipi ve workspace-write ağ kapalılığı açıkça verilir.
-const CODEX_ISOLATION = ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
-  ...(IS_WIN ? ['-c', 'windows.sandbox="unelevated"'] : []), '-c', 'sandbox_workspace_write.network_access=false'];
+// Aday kullanıcının Codex ayarları olmadan başlar: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
+// plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları oturuma yüklenmez. Kullanıcı ayarı
+// yok sayıldığı için iki ayar oradan aynen taşınır: Windows sandbox kipi (kullanıcıda elevated varsa
+// düşürülmez; yoksa unelevated) ve giriş bilgilerinin nerede saklandığı (keyring ile girişte aday kimlik
+// doğrulayabilsin). Ağ, workspace-write'ta açıkça kapalıdır. Bu bir güvenlik sınırı değildir: sandbox okumayı
+// kısıtlamadığı için kasıtlı bir aday kullanıcının dosyalarını okuyup kendi codex sürecini başlatabilir
+// (README "Bilinen sınırlar").
+function userCodexSetting(table, key, allowed) {
+  const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  let text;
+  try { text = fs.readFileSync(path.join(home, 'config.toml'), 'utf8'); } catch { return null; }
+  let current = '';
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, '').trim();
+    const t = /^\[([^\]]+)\]$/.exec(line);
+    if (t) { current = t[1].trim(); continue; }
+    const m = /^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"$/.exec(line);
+    if (m && current === table && m[1] === key) return allowed.includes(m[2]) ? m[2] : null;
+  }
+  return null;
+}
+function codexIsolation() {
+  const store = userCodexSetting('', 'cli_auth_credentials_store', ['file', 'keyring', 'auto', 'ephemeral']);
+  const winSandbox = userCodexSetting('windows', 'sandbox', ['elevated', 'unelevated']) || 'unelevated';
+  return ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
+    ...(IS_WIN ? ['-c', `windows.sandbox="${winSandbox}"`] : []),
+    ...(store ? ['-c', `cli_auth_credentials_store="${store}"`] : []),
+    // Ortam değişkenleri: yalnızca temel değişkenler (PATH, HOME vb.) kabuğa geçer; Codex'in varsayılanı hepsini geçirir.
+    '-c', 'shell_environment_policy.inherit="core"',
+    '-c', 'sandbox_workspace_write.network_access=false'];
+}
 
 function codexArgs(a, task, dir, lastMsgFile) {
-  return ['exec', '-m', a.model, ...CODEX_ISOLATION,
+  return ['exec', '-m', a.model, ...codexIsolation(),
     '-c', `model_reasoning_effort="${a.effort}"`, '-c', `service_tier="${a.tier}"`,
     '-s', task.sandbox, '-C', dir, '--skip-git-repo-check', '--ephemeral', '--json',
     ...(a.cyber ? ['--cyber-access-program', a.cyber] : []),
