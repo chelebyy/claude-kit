@@ -864,3 +864,36 @@ test('PowerShell: security modelinin çok sayıda yazımı kalıp denetimini zam
   denied(ps('codex exec ' + m + '-m gpt-0-unapproved -'), /gpt-0-unapproved/);
   assert.ok(Date.now() - t0 < 2000, 'denetim 2 sn altında bitmeli');
 });
+
+// Tek bir uzun sözcük düzenli ifadeyi karesel geri izlemeye sokup hook'u 5 sn zaman aşımına (fail-open)
+// sokmasın. Eski SCRIPT_FLAG.bash (/^-[a-zA-Z]*c[a-zA-Z]*$/) 250000 karakterde ~20 sn sürüyordu.
+test('uzun bash betik bayrağı sözcüğü denetimi zaman aşımına sokmaz', () => {
+  for (const flag of ['c'.repeat(250000), 'co'.repeat(125000), 'c'.repeat(250000) + 'x']) {
+    const t0 = Date.now();
+    denied(bash('bash -' + flag + '=1 x; codex exec -m gpt-0-unapproved -'), /gpt-0-unapproved/);
+    assert.ok(Date.now() - t0 < 1000, `-${flag.slice(0, 4)}… ${Date.now() - t0} ms sürdü`);
+  }
+  // Uzun ama geçerli bir betik bayrağı yine betik bayrağıdır.
+  const t0 = Date.now();
+  denied(bash('bash -' + 'l'.repeat(250000) + 'c "codex exec -m gpt-0-unapproved -"'), /gpt-0-unapproved/);
+  assert.ok(Date.now() - t0 < 1000, `uzun -l…c ${Date.now() - t0} ms sürdü`);
+});
+
+// Lexer her & / | / > / < karakterinde büyüyen sözcüğün tamamına düzenli ifade uyguluyordu (karesel):
+// 1>&>&>&… 250000 karakterde ~20 sn.
+test('uzun yönlendirme dizisi lexer taramasını karesel yavaşlatmaz', () => {
+  for (const [mk, s] of [[bash, '>&'], [bash, '<&'], [bash, '>|'], [bash, '>'], [ps, '>&'], [bash, '2>&1>']]) {
+    const t0 = Date.now();
+    denied(mk('echo 1' + s.repeat(Math.floor(250000 / s.length)) + ' x; codex exec -m gpt-0-unapproved -'), /gpt-0-unapproved/);
+    assert.ok(Date.now() - t0 < 1000, `${JSON.stringify(s)} ${Date.now() - t0} ms sürdü`);
+  }
+});
+
+// security sözleşmesindeki -c anahtar=değer ayrıştırması: değerdeki uzun boşluk ve satır sonu
+// /\s*(.*)$/ kısmını karesel geri izlemeye sokuyordu (~17 sn); çağrı yine reddedilmeli.
+test('security sözleşmesinde uzun boşluk ve satır sonlu -c değeri zaman aşımına sokmaz', () => {
+  const t0 = Date.now();
+  secDenied(bash('codex exec -m gpt-0-"sec" -c "model=' + ' '.repeat(250000) + '\nx\n" --cyber-access-program prog_blue -s read-only -'));
+  secDenied(bash('codex exec -m gpt-0-"sec" -c "windows.sandbox=unelevated' + ' '.repeat(250000) + '\n" --cyber-access-program prog_blue -s read-only -'));
+  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms sürdü`);
+});
