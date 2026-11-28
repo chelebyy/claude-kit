@@ -3,7 +3,9 @@
 // Kullanım:
 //   node claude/models/eval/run.cjs --model <slug> --effort <efor> --tier <fast|default>
 //     [--cyber-access-program <standard|daybreak_blue|daybreak_red>] [--task <id>] [--split <dev|frozen>]
-//     [--repeats <1-10>] [--dry-run]
+//     [--repeats <1-10>] [--tasks <görev-klasörü>] [--results <sonuç-klasörü>] [--dry-run]
+// --tasks: depo dışındaki (ör. özel) bir görev seti; verilirse sonuçlar varsayılan olarak onun yanındaki results/
+// klasörüne yazılır, böylece özel görevlerin cevapları açık depoya girmez.
 // Her görev için: fixture geçici bir klasöre kopyalanır, Codex
 // `codex exec` ile çalıştırılır, ardından kontroller yapılır. Sonuç results/ altına yazılır.
 // Ayrıntılar: claude/models/README.md
@@ -37,9 +39,16 @@ function parseArgs(argv) {
     else if (k === '--cyber-access-program') a.cyber = argv[++i];
     else if (k === '--split') a.split = argv[++i];
     else if (k === '--repeats') a.repeats = argv[++i];
+    else if (k === '--tasks') a.tasksDir = argv[++i];
+    else if (k === '--results') a.resultsDir = argv[++i];
     else throw new Error(`bilinmeyen argüman: ${k}`);
   }
   if (a.split !== undefined && !SPLITS.has(a.split)) throw new Error('--split: dev|frozen');
+  for (const k of ['tasksDir', 'resultsDir']) {
+    if (a[k] === undefined) continue;
+    if (typeof a[k] !== 'string' || !a[k] || !fs.existsSync(a[k]) || !fs.statSync(a[k]).isDirectory()) throw new Error(`--${k === 'tasksDir' ? 'tasks' : 'results'} var olan bir klasör olmalı`);
+    a[k] = fs.realpathSync(a[k]);
+  }
   if (a.repeats === undefined) a.repeats = 1;
   else if (!/^(10|[1-9])$/.test(a.repeats)) throw new Error('--repeats: 1-10 arası bir tam sayı');
   else a.repeats = Number(a.repeats);
@@ -108,8 +117,8 @@ function snapshot(root) {
   return out;
 }
 
-function loadTasks(only, split) {
-  const dir = path.join(ROOT, 'tasks');
+function loadTasks(only, split, tasksRoot = path.join(ROOT, 'tasks')) {
+  const dir = tasksRoot;
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter(e => e.isDirectory() && (!only || e.name === only))
     .map(e => {
@@ -119,6 +128,20 @@ function loadTasks(only, split) {
       if (!SANDBOXES.has(task.sandbox)) throw new Error(`${e.name}: sandbox read-only ya da workspace-write olmalı`);
       if (task.split !== undefined && !SPLITS.has(task.split)) throw new Error(`${e.name}: split dev ya da frozen olmalı`);
       if (task.version !== undefined && !(Number.isInteger(task.version) && task.version >= 1)) throw new Error(`${e.name}: version pozitif bir tam sayı olmalı`);
+      if (fs.existsSync(path.join(base, 'fixture', HIDDEN_DIR))) throw new Error(`${e.name}: fixture ${HIDDEN_DIR}/ içeremez`);
+      if (task.check && task.check.verify !== undefined && (typeof task.check.verify !== 'string' || !/^[a-z0-9._-]+\.c?js$/.test(task.check.verify) || !fs.existsSync(path.join(base, 'verify', task.check.verify)))) throw new Error(`${e.name}: check.verify verify/ klasöründe bir dosya olmalı`);
+      if (task.check && task.check.steps !== undefined) {
+        const st = task.check.steps;
+        const okStep = x => x && typeof x.command === 'string' && /^node [A-Za-z0-9_./ -]+$/.test(x.command) &&
+          Number.isInteger(x.timeoutMs) && x.timeoutMs >= 1000 && x.timeoutMs <= 600000;
+        if (!Array.isArray(st) || !st.length || st.length > 10 || !st.every(okStep) || !task.check.verify) {
+          throw new Error(`${e.name}: check.steps 1-10 adım olmalı (node komutu, timeoutMs 1000-600000) ve check.verify gerektirir`);
+        }
+      }
+      if (task.check && task.check.fixturePasses !== undefined && !(task.check.fixturePasses === true && Array.isArray(task.claims) && task.claims.length)) {
+        throw new Error(`${e.name}: check.fixturePasses yalnızca true olabilir ve claims gerektirir`);
+      }
+      if (task.check && task.check.timeoutMs !== undefined && !(Number.isInteger(task.check.timeoutMs) && task.check.timeoutMs >= 1000 && task.check.timeoutMs <= 600000)) throw new Error(`${e.name}: check.timeoutMs 1000-600000 olmalı`);
       return { ...task, base, prompt: fs.readFileSync(path.join(base, 'prompt.md'), 'utf8') };
     })
     // split verilmemiş görevler eski settir (ön kontrol); --split verilince yalnızca o bölüm çalışır.
@@ -383,6 +406,227 @@ function prepareCheckDir(work, after, ctx) {
   return { dir };
 }
 
+// Gizli kontrol dosyalarının kontrol klasöründeki yeri. Fixture'da bu adla bir şey olamaz (loadTasks denetler).
+const HIDDEN_DIR = '__hidden__';
+
+// Görevin hidden/ klasöründeki normal dosyaları kontrol klasörünün __hidden__/ alt klasörüne kopyalar
+// (yalnızca yeni dosya: wx). Sorun varsa nedenini, yoksa null döndürür.
+function copyHidden(task, dir) {
+  const src = path.join(task.base, 'hidden');
+  if (!fs.existsSync(src)) return null;
+  try {
+    for (const [rel, hash] of snapshot(src)) {
+      if (hash === 'non-regular-entry') return `${rel}: not a regular file`;
+      const dst = path.join(dir, HIDDEN_DIR, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.writeFileSync(dst, fs.readFileSync(path.join(src, ...rel.split('/'))), { flag: 'wx' });
+    }
+  } catch (e) { return e.code || e.message; }
+  return null;
+}
+
+// Kontrol komutunun yazdığı __hidden__/results.json'u görevin verify/ klasöründeki doğrulayıcıyla denetler.
+// Dosya model etkisindeki bir veridir: normal dosya, en çok 16 MB, yalnızca JSON.parse. Doğrulayıcı depodan
+// (task.base) yüklenir, kontrol klasöründen değil.
+const RESULTS_MAX = 16 * 1024 * 1024;
+const RESULTS_MAX_DEPTH = 64;
+const RESULTS_MAX_NODES = 2000000;
+// JSON metnindeki dizi/nesne derinliğini ve toplam değer sayısını (ayraçlar ve virgüller) dizgi dışında, doğrusal
+// zamanda sayar. Sınır aşılırsa nedenini, yoksa null döndürür.
+function jsonShapeProblem(text) {
+  let depth = 0, nodes = 0, inStr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inStr) { if (c === 92) i++; else if (c === 34) inStr = false; continue; }
+    if (c === 34) inStr = true;
+    else if (c === 91 || c === 123) { if (++depth > RESULTS_MAX_DEPTH) return `nested deeper than ${RESULTS_MAX_DEPTH}`; if (++nodes > RESULTS_MAX_NODES) return 'too many values'; }
+    else if (c === 93 || c === 125) depth--;
+    else if (c === 44 && ++nodes > RESULTS_MAX_NODES) return 'too many values';
+  }
+  return null;
+}
+// --- Birleşik diff (değişiklik kaydı) ---
+const PATCH_MAX = 1024 * 1024;
+const LCS_MAX = 4000000;
+// Satırlar; dosya satır başıyla bitmiyorsa son satırın sonuna bir işaret (NUL) eklenir: "a" ile "a\n" farklı satırdır ve
+// çıktıda "\ No newline at end of file" yazılır. NUL içeren metin ikili sayıldığı için işaret içerikle karışmaz.
+const NOEOL = String.fromCharCode(0);
+const splitLines = t => {
+  const l = t.split('\n');
+  if (l[l.length - 1] === '') l.pop(); else l[l.length - 1] += NOEOL;
+  return l;
+};
+const PATCH_FILE_MAX = 512 * 1024;
+const PATCH_LINES_MAX = 50000;
+const countLines = t => { let n = 0; for (let i = t.indexOf('\n'); i >= 0; i = t.indexOf('\n', i + 1)) n++; return n; };
+
+// İki metnin satır farkı: [' '|'-'|'+', satır] listesi. Ortak baş ve son kırpılır; kalan kısım küçükse LCS ile,
+// büyükse bütünüyle silinmiş/eklenmiş sayılır (doğrusal bellek sınırı).
+function lineOps(a, b) {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let q = 0;
+  while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+  const A = a.slice(p, a.length - q), B = b.slice(p, b.length - q);
+  const ops = a.slice(0, p).map(l => [' ', l]);
+  if (A.length * B.length > LCS_MAX) {
+    for (const l of A) ops.push(['-', l]);
+    for (const l of B) ops.push(['+', l]);
+  } else {
+    const n = A.length, m = B.length, w = m + 1;
+    const L = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i * w + j] = A[i] === B[j] ? L[(i + 1) * w + j + 1] + 1 : Math.max(L[(i + 1) * w + j], L[i * w + j + 1]);
+    let i = 0, j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && A[i] === B[j]) { ops.push([' ', A[i]]); i++; j++; }
+      else if (i < n && (j === m || L[(i + 1) * w + j] >= L[i * w + j + 1])) { ops.push(['-', A[i]]); i++; }
+      else { ops.push(['+', B[j]]); j++; }
+    }
+  }
+  for (const l of a.slice(a.length - q)) ops.push([' ', l]);
+  return ops;
+}
+
+// Tek bir dosyanın birleşik diff'i (3 satır bağlam). oldText/newText null ise dosya yok sayılır. Fark yoksa ''.
+function unifiedDiff(oldText, newText, name) {
+  const bin = t => t !== null && t.includes(String.fromCharCode(0));
+  const head = `--- ${oldText === null ? '/dev/null' : 'a/' + name}\n+++ ${newText === null ? '/dev/null' : 'b/' + name}\n`;
+  if (oldText === newText) return '';
+  if (bin(oldText) || bin(newText)) return `${head}Binary file ${name} differs\n`;
+  const big = t => t !== null && (t.length > PATCH_FILE_MAX || countLines(t) > PATCH_LINES_MAX);
+  if (big(oldText) || big(newText)) return `${head}(file too large for a diff: ${[oldText, newText].map(t => (t === null ? '-' : `${t.length} chars`)).join(' -> ')})\n`;
+  const ops = lineOps(oldText === null ? [] : splitLines(oldText), newText === null ? [] : splitLines(newText));
+  if (!ops.some(o => o[0] !== ' ')) return '';
+  const C = 3;
+  let out = head;
+  let k = 0;
+  while (k < ops.length) {
+    while (k < ops.length && ops[k][0] === ' ') k++;
+    if (k >= ops.length) break;
+    let start = Math.max(0, k - C), end = k;
+    for (;;) {
+      while (end < ops.length && ops[end][0] !== ' ') end++;
+      let e = end;
+      while (e < ops.length && ops[e][0] === ' ' && e - end < 2 * C) e++;
+      if (e < ops.length && ops[e][0] !== ' ') { end = e; continue; }
+      end = Math.min(ops.length, end + C);
+      break;
+    }
+    let oldBefore = 0, newBefore = 0;
+    for (let i = 0; i < start; i++) { if (ops[i][0] !== '+') oldBefore++; if (ops[i][0] !== '-') newBefore++; }
+    let oc = 0, nc = 0, body = '';
+    for (let i = start; i < end; i++) {
+      const [t, l] = ops[i];
+      if (t !== '+') oc++;
+      if (t !== '-') nc++;
+      body += l.endsWith(NOEOL) ? `${t}${l.slice(0, -1)}\n\\ No newline at end of file\n` : `${t}${l}\n`;
+    }
+    out += `@@ -${oc ? oldBefore + 1 : oldBefore},${oc} +${nc ? newBefore + 1 : newBefore},${nc} @@\n` + body;
+    k = end;
+  }
+  return out;
+}
+
+// Modelin değiştirdiği dosyalar için birleşik diff; yalnızca normal dosyalar okunur, toplam 1 MB ile sınırlı.
+// Okunan dosya model çalışmasından hemen sonra alınan anlık görüntüyle (after: göreli yol -> SHA-256) aynı olmalıdır:
+// sonradan değişen dosya kaydedilmez, not düşülür. Büyük dosyalar okunmadan özetlenir.
+function changesPatch(fixture, work, changed, after) {
+  // Dosya bir kez açılır ve açılan tanıtıcıdan en çok PATCH_FILE_MAX + 1 bayt okunur (yol yeniden açılmaz; FIFO ya da
+  // bağlantı açılmaz): okuma sırasında dosya değişse de büyüse de bellek sınırlı kalır. Sonuç anlık görüntüyle karşılaştırılır.
+  const C = fs.constants;
+  const FLAGS = C.O_RDONLY | (C.O_NOFOLLOW || 0) | (C.O_NONBLOCK || 0);
+  const read = (root, rel, check) => {
+    const f = path.join(root, ...rel.split('/'));
+    const snap = check && after ? after.get(rel) : undefined;
+    const st = fs.lstatSync(f, { throwIfNoEntry: false });
+    const regularNow = Boolean(st && st.isFile() && st.nlink <= 1);
+    // Anlık görüntüdeki durumla karşılaştırılır: görüntüde normal bir dosya olan girdi kaybolduysa ya da türü
+    // değiştiyse, görüntüde olmayan bir dosya sonradan belirdiyse kayıt yapılmaz.
+    if (check && after && (snap === undefined ? Boolean(st) : snap === 'non-regular-entry' ? regularNow : !regularNow)) return { drift: true };
+    if (!regularNow) return null;
+    let fd;
+    try {
+      fd = fs.openSync(f, FLAGS);
+      const fst = fs.fstatSync(fd);
+      if (!fst.isFile() || fst.nlink > 1) return check && after ? { drift: true } : null;
+      const buf = Buffer.alloc(PATCH_FILE_MAX + 1);
+      let n = 0;
+      for (let r; n < buf.length && (r = fs.readSync(fd, buf, n, buf.length - n, n)) > 0;) n += r;
+      // Büyük dosyanın yalnızca özeti yazılır (içerik kaydedilmediği için anlık görüntüyle karşılaştırılmaz).
+      if (n > PATCH_FILE_MAX) return { tooBig: true };
+      const data = buf.subarray(0, n);
+      if (check && after && snap !== crypto.createHash('sha256').update(data).digest('hex')) return { drift: true };
+      return data.toString('utf8');
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  };
+  let out = '';
+  for (const rel of changed) {
+    let part;
+    try {
+      const o = read(fixture, rel, false), n = read(work, rel, true);
+      const odd = [o, n].find(x => x && typeof x === 'object');
+      part = odd ? `--- a/${rel}\n+++ b/${rel}\n(${odd.drift ? 'changed after the model run; not recorded' : `file too large for a diff: more than ${PATCH_FILE_MAX} bytes`})\n` : unifiedDiff(o, n, rel);
+    } catch (e) { part = `--- ${rel}\n(could not be read: ${e.code || e.message})\n`; }
+    if (out.length + part.length > PATCH_MAX) { out += `(patch truncated at ${PATCH_MAX} bytes; remaining files: ${changed.slice(changed.indexOf(rel)).join(', ')})\n`; break; }
+    out += part;
+  }
+  return out;
+}
+
+// Kontrol klasöründeki bir sonuç dosyasını güvenli biçimde okur: { data } ya da { failure }.
+function readResultsFile(dir, name) {
+  const f = path.join(dir, HIDDEN_DIR, name);
+  let st;
+  try { st = fs.lstatSync(f); } catch { return { failure: `no ${name} (the check stopped before writing its results)` }; }
+  if (!st.isFile() || st.nlink > 1 || st.size > RESULTS_MAX) return { failure: `${name} is not a regular file of acceptable size` };
+  const text = fs.readFileSync(f, 'utf8');
+  // Boyut sınırı bayt sayar, nesne sayısını ve derinliği değil: sıkışık bir JSON milyonlarca iç içe nesneye açılıp
+  // bu süreci (kontrolün süre sınırı dışında) durdurabilirdi. Ayrıştırmadan önce biçim taranır.
+  const shape = jsonShapeProblem(text);
+  if (shape) return { failure: `${name} rejected: ${shape}` };
+  try { return { data: JSON.parse(text) }; } catch { return { failure: `${name} is not valid JSON` }; }
+}
+
+// Ana kontrol komutunu ve adımları (check.steps) sırayla çalıştırır. Her süreç kendi temiz klasöründe çalışır
+// (dirs(i): modelin çıktısının anlık görüntüsü ve gizli dosyaların temiz kopyası): bir süreç sonraki bir sürecin
+// dosyalarını, toplayıcısını ya da sonucunu değiştiremez. Her sürecin sonucu kendi klasöründen, süreç biter bitmez okunur.
+// dirs(i) => { dir } | { skip: neden } | { env: neden }; runOne(command, timeoutMs, dir) => { passed, timedOut, sandboxError }.
+function runChecks(task, dirs, runOne) {
+  const out = { passed: false };
+  const steps = Array.isArray(task.check.steps) ? task.check.steps : [];
+  const procs = [{ command: task.check.command, timeoutMs: task.check.timeoutMs, results: 'results.json' },
+    ...steps.map((st, i) => ({ command: st.command, timeoutMs: st.timeoutMs, results: `results-step${i}.json`, step: i }))];
+  const data = [];
+  for (const p of procs) {
+    const d = dirs(data.length);
+    if (d.env) return { environmentError: d.env };
+    if (d.skip) return { checkSkipped: d.skip };
+    const c = runOne(p.command, p.timeoutMs, d.dir);
+    if (c.sandboxError) return { sandboxError: c.sandboxError };
+    if (!c.passed) {
+      if (c.timedOut) { out.timedOut = true; if (p.step !== undefined) out.stepTimedOut = p.step; }
+      else if (p.step !== undefined) out.stepFailed = p.step;
+      return out;
+    }
+    data.push(task.check.verify ? readResultsFile(d.dir, p.results) : { data: null });
+  }
+  if (!task.check.verify) { out.passed = true; return out; }
+  const failure = data.find(r => r.failure);
+  if (failure) { out.verifyFailures = [failure.failure]; return out; }
+  const v = verifyData(task, steps.length ? { main: data[0].data, steps: data.slice(1).map(r => r.data) } : data[0].data);
+  out.passed = v.ok;
+  if (!v.ok) out.verifyFailures = v.failures.slice(0, 20);
+  return out;
+}
+
+// Doğrulayıcı (verify/, depodan yüklenir) adım yoksa ana sonucu, varsa { main, steps } alır.
+function verifyData(task, data) {
+  const verifier = require(path.join(task.base, 'verify', path.basename(task.check.verify)));
+  let r;
+  try { r = verifier.verify(data); } catch (e) { return { ok: false, failures: [`verifier rejected the results: ${e && e.message}`] }; }
+  return { ok: Boolean(r && r.ok === true), failures: Array.isArray(r && r.failures) ? r.failures.map(String) : [] };
+}
+
 // codex sandbox -C <dir>, üst klasörlerdeki .codex/ ayarlarını proje ayarı olarak okuyabilir. Ev
 // klasörünün altındaki üst klasörlerde .codex/ varsa kontrol çalışmaz. Ev klasörünün kendisindeki
 // ~/.codex Codex'in kendi ayar klasörüdür (CODEX_HOME) ve beklenir.
@@ -486,8 +730,9 @@ function evaluate(a, task, outDir) {
   // Zaman aşımından sonra codex'in alt süreci klasörü bir süre tutabilir (Windows'ta EBUSY).
   // rmSync bağlantıları izlemez: bağlantının kendisini siler, hedefini değil.
   try { fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch { result.leftoverDir = work; }
-  if (ctx.checkDir) {
-    try { fs.rmSync(ctx.checkDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch { result.leftoverCheckDir = ctx.checkDir; }
+  for (const c of [ctx, ...(ctx.extraCheckDirs || [])]) {
+    if (!c.checkDir) continue;
+    try { fs.rmSync(c.checkDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch { result.leftoverCheckDir = c.checkDir; }
   }
   try { fs.rmSync(lastMsgFile, { force: true }); } catch {}
   return result;
@@ -551,6 +796,12 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
     if (testHooks.afterSnapshot) testHooks.afterSnapshot(work); // yalnızca testler: geride kalan bir süreci taklit eder
     const result = { id: task.id, run: task.run || 1, kind: task.kind, exitStatus: r.status, durationMs, usage: isClaude ? claudeUsage(claudeOut) : lastUsage(r.stdout), changed, harnessFiles: harness };
     if (links.length) result.linksLeft = true;
+    // Değişiklik kaydı: modelin değiştirdiği normal dosyaların temiz fixture'a göre birleşik diff'i (<deneme>.patch).
+    // Kod kalitesi kör puanlanırken puanlayıcı yalnızca son mesajı değil yapılan değişikliği de görür.
+    const patch = changesPatch(fixture, work, changed, after);
+    const patchFile = path.join(outDir, `${stem}.patch`);
+    if (patch) { fs.writeFileSync(patchFile, redactLocalPaths(patch, work)); result.patchFile = `${stem}.patch`; }
+    else fs.rmSync(patchFile, { force: true });
     if (task.mustNotModify) result.readOnlyOk = changed.length === 0;
     if (task.protected) result.protectedOk = !task.protected.some(p => changed.includes(p));
     // Codex son mesaj yazmadan hata koduyla çıktıysa (API ya da oturum hatası) model değerlendirilemedi:
@@ -602,15 +853,56 @@ function evaluateIn(a, task, outDir, work, lastMsgFile, ctx) {
           // Kopyalama .codex'i dışarıda bırakır; yine de varsa (harf farkı vb.) kontrol çalışmaz.
           result.checkPassed = false;
           result.checkSkipped = 'codex config in the check dir';
+        } else if (fs.existsSync(path.join(task.base, 'hidden')) && [...after.keys()].some(rel => rel.split('/')[0].toLowerCase() === HIDDEN_DIR)) {
+          // Model gizli test klasörünün adıyla bir şey bıraktı: gizli test yerine kendi dosyası çalışabilirdi.
+          result.checkPassed = false;
+          result.checkSkipped = `model wrote ${HIDDEN_DIR}/ (reserved for hidden checks)`;
         } else {
-          const c = runCheck(task.check.command, prep.dir, testHooks.checkTimeoutMs);
+          // Gizli kontrol dosyaları (görevin hidden/ klasörü) modelin göremediği, yalnızca kontrol klasörüne
+          // model çalışmasından sonra konan dosyalardır: model testi görüp ona göre kod yazamaz.
+          const hiddenProblem = copyHidden(task, prep.dir);
+          if (hiddenProblem) {
+            result.environmentError = `hidden check files could not be copied (${hiddenProblem}); not a model result.`;
+            result.pass = null;
+            return result;
+          }
+          // Ana kontrol ve adımlar (check.steps): her biri ayrı bir süreçte, dışarıdan uygulanan süre sınırıyla; karar
+          // depodaki doğrulayıcıyla (check.verify) bu süreçte verilir (runChecks).
+          // İlk süreç hazırlanmış klasörde; sonraki her süreç için aynı denetimlerle yeni bir klasör hazırlanır.
+          const dirFor = i => {
+            if (i === 0) return { dir: prep.dir };
+            const sub = {};
+            (ctx.extraCheckDirs || (ctx.extraCheckDirs = [])).push(sub);
+            const p = prepareCheckDir(work, after, sub);
+            if (p.unsafe) return { skip: `check dir not usable: ${p.unsafe}` };
+            if (p.drift) return { skip: `work dir changed after the model run: ${p.drift}` };
+            if (p.foreign) return { skip: `check dir has unexpected content: ${p.foreign}` };
+            const above = codexConfigAbove(p.dir);
+            if (above) return { env: `Codex config found above the check dir (${above}); not a model result.` };
+            const hp = copyHidden(task, p.dir);
+            if (hp) return { env: `hidden check files could not be copied (${hp}); not a model result.` };
+            return { dir: p.dir };
+          };
+          const c = runChecks(task, dirFor, (command, ms, dir) => runCheck(command, dir, testHooks.checkTimeoutMs || ms));
+          if (c.environmentError) {
+            result.environmentError = c.environmentError;
+            result.pass = null;
+            return result;
+          }
+          if (c.checkSkipped) {
+            result.checkPassed = false;
+            result.checkSkipped = c.checkSkipped;
+          }
           if (c.sandboxError) {
             result.environmentError = `Check sandbox could not start (${c.sandboxError}); not a model result.`;
             result.pass = null;
             return result;
           }
-          result.checkPassed = c.passed;
+          if (!c.checkSkipped) result.checkPassed = c.passed;
           if (c.timedOut) result.checkTimedOut = true;
+          if (c.stepTimedOut !== undefined) result.stepTimedOut = c.stepTimedOut;
+          if (c.stepFailed !== undefined) result.stepFailed = c.stepFailed;
+          if (c.verifyFailures) result.verifyFailures = c.verifyFailures;
         }
       }
     }
@@ -778,12 +1070,13 @@ function securityRoleProblem(a, tasks, registry) {
 
 function main() {
   const a = parseArgs(process.argv.slice(2));
-  const tasks = loadTasks(a.task, a.split);
+  const tasks = loadTasks(a.task, a.split, a.tasksDir);
   if (!tasks.length) throw new Error('görev bulunamadı');
   const roleIssue = securityRoleProblem(a, tasks, loadRegistry());
   if (roleIssue) throw new Error(roleIssue);
   const stamp = new Date().toISOString().slice(0, 10);
-  const outDir = path.join(ROOT, 'results', `${stamp}-${a.model}-${a.effort}${a.cyber ? `-${a.cyber}` : ''}${a.split ? `-${a.split}` : ''}`);
+  const resultsRoot = a.resultsDir || (a.tasksDir ? path.join(path.dirname(a.tasksDir), 'results') : path.join(ROOT, 'results'));
+  const outDir = path.join(resultsRoot, `${stamp}-${a.model}-${a.effort}${a.cyber ? `-${a.cyber}` : ''}${a.split ? `-${a.split}` : ''}`);
   if (!a.dryRun) fs.mkdirSync(outDir, { recursive: true });
   const taskVersions = Object.fromEntries(tasks.map(t => [t.id, { split: t.split || null, version: t.version || null }]));
   let results = a.dryRun ? [] : previousResults(outDir, a, taskVersions);
@@ -832,5 +1125,5 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`model-eval: ${e.message}`); process.exit(1); }
 } else {
   // testHooks yalnızca run.test.cjs içindir: gerçek codex yerine sahte bir betik çalıştırır.
-  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
+  module.exports = { securityRoleProblem, registryPath, loadRegistry, parseArgs, lastUsage, claudeArgs, parseClaudeOutput, claudeUsage, pickClaudeExe, decoyCitations, redactLocalPaths, redactDeep, maskSecrets, mergeResult, previousResults, previousTaskVersions, attemptsToRun, acquireLock, logRun, priorTimeouts, summaryTotal, withTimeoutRetry, answerStem, loadTasks, copyHidden, runChecks, verifyData, readResultsFile, jsonShapeProblem, unifiedDiff, changesPatch, HIDDEN_DIR, evaluate, testHooks, codexCommand, sandboxed, codexConfigAbove, lockDown };
 }

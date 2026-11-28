@@ -5,6 +5,7 @@
 //   node claude/models/eval/stats.cjs <klasör-A> <klasör-B> [--grades <ad>]  eşleştirilmiş karşılaştırma
 // --grades <ad>: her klasördeki grades-<ad>.json (blind.cjs unblind --label <ad> çıktısı) puan olarak kullanılır;
 // verilmezse puan geçti = 1, kaldı = 0'dır. Verildiyse ölçülmüş her denemenin notu olmalıdır (eksik not hata).
+// --tasks <klasör> / --results <klasör>: depo dışındaki (özel) görev seti ve sonuç kökü (run.cjs --tasks ile aynı).
 // --role <rol>: onay kontrolü için B'nin (mevcut model) kayıtta bu rolle onaylı olması gerekir; verilmezse
 // approval.blockers'a yazılır.
 // --margin <0-1>: yalnızca keşif için withinMargin payı (varsayılan 0.25). Rol kararına giren approval alanı bu
@@ -41,10 +42,14 @@ function taskStats(results) {
 const hardFail = r => r.readOnlyOk === false || r.protectedOk === false || r.linksLeft === true ||
   r.checkTimedOut === true || Boolean(r.checkSkipped) || r.timedOutTwice === true;
 
-function scoreOf(r, grades) {
+// graded: kör puanlanan (rubrik maddeli) görevlerin kimlikleri. Verildiyse yalnızca bu görevlerde not aranır; öteki
+// görevler (gizli kontrollü düzeltmeler) geçti/kaldı ile puanlanır.
+function scoreOf(r, grades, graded) {
   if (r.pass === null || r.pass === undefined) return null;
   if (hardFail(r)) return 0;
-  if (grades === undefined) return r.pass === true ? 1 : 0;
+  // Kontrolü olan bir görevde kontrol başarısızsa kör not (ör. kod kalitesi) puanı kurtarmaz.
+  if (r.checkPassed === false) return 0;
+  if (grades === undefined || (graded && !graded.has(r.id))) return r.pass === true ? 1 : 0;
   const k = `${r.id}#${runOf(r)}`;
   const g = Object.prototype.hasOwnProperty.call(grades, k) ? grades[k] : undefined;
   if (g === undefined) throw new Error(`not eksik: ${k}`);
@@ -54,10 +59,10 @@ function scoreOf(r, grades) {
   return g.score / g.max;
 }
 
-function taskMeans(results, grades) {
+function taskMeans(results, grades, graded) {
   const sums = new Map();
   for (const r of results) {
-    const s = scoreOf(r, grades);
+    const s = scoreOf(r, grades, graded);
     if (s === null) continue;
     const m = sums.get(r.id) || { sum: 0, n: 0 };
     m.sum += s; m.n++;
@@ -97,9 +102,9 @@ function checkAttempts(results, repeats, side) {
 // birbirine bağlı olduğu için birim görevdir, deneme değil. Aralık sıfırı dışlamıyorsa karar "açık fark yok".
 // withinMargin: A, B'den "payından fazla geride değil": aralığın alt ucu -margin'in üstünde, en az 3 görev
 // karşılaştırılmış ve hiçbir görev dışarıda kalmamış. Keşif içindir; rol kararı approvalCheck'e bakar.
-function pairedCompare(A, B, { gradesA, gradesB, seed = 1, iterations = 10000, margin = DEFAULT_MARGIN } = {}) {
+function pairedCompare(A, B, { gradesA, gradesB, graded, seed = 1, iterations = 10000, margin = DEFAULT_MARGIN } = {}) {
   if (!(typeof margin === 'number' && margin >= 0 && margin <= 1)) throw new Error('margin 0 ile 1 arasında olmalı');
-  const ma = taskMeans(A, gradesA), mb = taskMeans(B, gradesB);
+  const ma = taskMeans(A, gradesA, graded), mb = taskMeans(B, gradesB, graded);
   const ids = [...ma.keys()].filter(id => mb.has(id)).sort();
   const all = new Set([...A.map(r => r.id), ...B.map(r => r.id)]);
   const excluded = [...all].filter(id => !ids.includes(id)).sort();
@@ -190,6 +195,18 @@ const ATTEST = Object.freeze([
   'runs.jsonl\'deki bu model ve eforla yapılmış bütün ölçümler sonuç yazısında listelendi (yalnızca seçilen değil)',
 ]);
 
+// Görev setinde rubrik maddeleri (claims) olan görevler: kör notlar yalnızca bunlar için verilir.
+function claimTaskIds(tasksRoot = path.join(__dirname, 'tasks')) {
+  const out = new Set();
+  for (const e of fs.readdirSync(tasksRoot, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    let t;
+    try { t = JSON.parse(fs.readFileSync(path.join(tasksRoot, e.name, 'task.json'), 'utf8')); } catch { continue; }
+    if (Array.isArray(t.claims) && t.claims.length) out.add(t.id);
+  }
+  return out;
+}
+
 // Rol kararının sabit koşulları; komut satırından değiştirilemez.
 const APPROVAL = Object.freeze({ split: 'frozen', repeats: 3, margin: 0.25 });
 
@@ -270,7 +287,7 @@ function approvalCheck(a, b, expected, opts = {}) {
     }
     for (const r of s.tasks) if (!ids.includes(r.id)) reasons.push(`${side}: ${r.id} kilitli sette değil`);
   }
-  const cmp = pairedCompare(a.tasks, b.tasks, { gradesA: opts.gradesA, gradesB: opts.gradesB, margin: APPROVAL.margin });
+  const cmp = pairedCompare(a.tasks, b.tasks, { gradesA: opts.gradesA, gradesB: opts.gradesB, graded: opts.graded, margin: APPROVAL.margin });
   if (cmp.excluded.length) reasons.push(`dışarıda kalan görevler: ${cmp.excluded.join(', ')}`);
   if (!cmp.ci || !(cmp.ci[0] > -APPROVAL.margin)) reasons.push(`aralığın alt ucu ${cmp.ci ? cmp.ci[0] : 'yok'} (-${APPROVAL.margin}'in üstünde olmalı)`);
   const n = x => (Array.isArray(x.timeoutRetries) ? x.timeoutRetries.length : 0);
@@ -280,12 +297,14 @@ function approvalCheck(a, b, expected, opts = {}) {
 
 function main(argv) {
   const dirs = [];
-  let label, margin, role, keyFile;
+  let label, margin, role, keyFile, tasksDir, resultsDir;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--grades') label = argv[++i];
     else if (argv[i] === '--margin') margin = Number(argv[++i]);
     else if (argv[i] === '--role') role = argv[++i];
     else if (argv[i] === '--key') keyFile = argv[++i];
+    else if (argv[i] === '--tasks') tasksDir = argv[++i];
+    else if (argv[i] === '--results') resultsDir = argv[++i];
     else dirs.push(argv[i]);
   }
   if (dirs.length === 1) return { model: readSummary(dirs[0]).model, byTask: taskStats(readSummary(dirs[0]).tasks) };
@@ -295,15 +314,17 @@ function main(argv) {
   compatibility(a, b);
   const secret = keyFile ? JSON.parse(fs.readFileSync(keyFile, 'utf8')).secret : undefined;
   if (keyFile && !(typeof secret === 'string' && /^[0-9a-f]{64}$/.test(secret))) throw new Error('anahtar dosyasında secret yok');
-  const ga = readGrades(dirs[0], label, { secret }), gb = readGrades(dirs[1], label, { secret });
-  const grades = { gradesA: ga && ga.grades, gradesB: gb && gb.grades, gradesVerified: Boolean(ga && gb && ga.verified && gb.verified) };
+  const rr = resultsDir ? { resultsRoot: resultsDir } : {};
+  const ga = readGrades(dirs[0], label, { secret, ...rr }), gb = readGrades(dirs[1], label, { secret, ...rr });
+  const graded = label ? claimTaskIds(tasksDir ? path.resolve(tasksDir) : undefined) : undefined;
+  const grades = { gradesA: ga && ga.grades, gradesB: gb && gb.grades, graded, gradesVerified: Boolean(ga && gb && ga.verified && gb.verified) };
   return { A: a.model, B: b.model, split: a.split || null,
-    ...pairedCompare(a.tasks, b.tasks, { gradesA: grades.gradesA, gradesB: grades.gradesB, ...(margin !== undefined ? { margin } : {}) }),
-    approval: approvalCheck(a, b, frozenTasks(), { ...grades, role }) };
+    ...pairedCompare(a.tasks, b.tasks, { gradesA: grades.gradesA, gradesB: grades.gradesB, graded, ...(margin !== undefined ? { margin } : {}) }),
+    approval: approvalCheck(a, b, frozenTasks(tasksDir ? path.resolve(tasksDir) : undefined), { ...grades, role }) };
 }
 
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)), null, 2)); } catch (e) { console.error(`model-eval stats: ${e.message}`); process.exit(1); }
 } else {
-  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, baselineProblem, roleNames, readGrades, gradesMac, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
+  module.exports = { taskStats, scoreOf, pairedCompare, compatibility, approvalCheck, baselineProblem, roleNames, claimTaskIds, readGrades, gradesMac, frozenTasks, APPROVAL, rng, main, DEFAULT_MARGIN };
 }

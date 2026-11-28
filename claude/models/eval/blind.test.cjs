@@ -16,6 +16,11 @@ function makeResults(root, name, model, answers) {
     tasks.push({ id, run, pass: true });
   }
   fs.writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({ model, effort: 'high', repeats: 2, tasks }));
+  // Kör puanlanan görevin rubrik maddeleri (yoksa görev pakete girmez); testler kendi maddelerini sonradan yazabilir.
+  for (const [id] of answers) {
+    const tj = path.join(root, 'tasks', id, 'task.json');
+    if (!fs.existsSync(tj)) { fs.mkdirSync(path.dirname(tj), { recursive: true }); fs.writeFileSync(tj, JSON.stringify({ id, claims: ['c1'] })); }
+  }
   return dir;
 }
 
@@ -28,7 +33,7 @@ test('paketleme: model adı cevaplardan silinir, harfler görev başına karış
     const b = makeResults(root, 'r-b', 'claude-y', [['t1', 1, 'claude-y here'], ['t1', 2, 'nothing']]);
     const out = path.join(root, 'pkg');
     const key = path.join(root, 'key.json');
-    blind.pack({ dirs: [a, b], out, key, seed: 5, resultsRoot: root });
+    blind.pack({ dirs: [a, b], out, key, seed: 5, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     const files = fs.readdirSync(path.join(out, 't1')).sort();
     assert.deepStrictEqual(files, ['A.md', 'B.md', 'C.md', 'D.md']);
     const all = files.map(f => fs.readFileSync(path.join(out, 't1', f), 'utf8')).join('\n');
@@ -38,7 +43,7 @@ test('paketleme: model adı cevaplardan silinir, harfler görev başına karış
     assert.strictEqual(Object.keys(k.items).length, 4);
     // Aynı tohum aynı karışım, farklı tohum (çoğunlukla) farklı.
     const out2 = path.join(root, 'pkg2');
-    blind.pack({ dirs: [a, b], out: out2, key: path.join(root, 'key2.json'), seed: 5, resultsRoot: root });
+    blind.pack({ dirs: [a, b], out: out2, key: path.join(root, 'key2.json'), seed: 5, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(root, 'key2.json'), 'utf8')).items, k.items);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -48,10 +53,10 @@ test('paketleme: anahtar paket klasörünün içine yazılamaz, dolu bir paket k
   try {
     const a = makeResults(root, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
     const out = path.join(root, 'pkg');
-    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(out, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(out, 'key.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /anahtar/);
     fs.mkdirSync(out);
     fs.writeFileSync(path.join(out, 'x'), '1');
-    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(root, 'k.json'), seed: 1, resultsRoot: root }), /boş/);
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(root, 'k.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /boş/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -60,10 +65,10 @@ test('paketleme: sonuç kökünün dışındaki klasör ve görev kimliği olmay
   const other = tmp();
   try {
     const a = makeResults(other, 'r-a', 'gpt-x', [['t1', 1, 'x']]);
-    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root }), /sonuç kökü/);
+    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /sonuç kökü/);
     const b = makeResults(root, 'r-b', 'gpt-x', []);
     fs.writeFileSync(path.join(b, 'summary.json'), JSON.stringify({ model: 'gpt-x', tasks: [{ id: '../evil', run: 1 }] }));
-    assert.throws(() => blind.pack({ dirs: [b], out: path.join(root, 'p2'), key: path.join(root, 'k2.json'), seed: 1, resultsRoot: root }), /görev kimliği/);
+    assert.throws(() => blind.pack({ dirs: [b], out: path.join(root, 'p2'), key: path.join(root, 'k2.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /görev kimliği/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(other, { recursive: true, force: true }); }
 });
 
@@ -74,7 +79,7 @@ test('ölçülmeyen denemeler pakete girmez', () => {
     const s = JSON.parse(fs.readFileSync(path.join(a, 'summary.json'), 'utf8'));
     s.tasks[1].pass = null;
     fs.writeFileSync(path.join(a, 'summary.json'), JSON.stringify(s));
-    blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root });
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     assert.deepStrictEqual(fs.readdirSync(path.join(root, 'p', 't1')), ['A.md']);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -125,7 +130,7 @@ test('paketleme: paket klasörüne takma ad (bağlantı) üzerinden verilen anah
     fs.mkdirSync(out);
     const alias = path.join(root, 'pkg-alias');
     fs.symlinkSync(out, alias, 'junction');
-    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /anahtar/);
     assert.deepStrictEqual(fs.readdirSync(out), []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -178,11 +183,11 @@ test('notları yazma: özette ölçülmemiş bir denemeye not yazılmaz, eksik n
     makeResults(root, 'r-b', 'gpt-y', [['t1', 1, 'x']]);
     const S = 'c'.repeat(64);
     const ok = { 'r-a': { 't1#1': { score: 1, max: 1, sha256: 'x' }, 't1#2': { score: 0, max: 1, sha256: 'y' } } };
-    assert.throws(() => blind.writeGrades({ ...ok, 'r-b': { 't1#9': { score: 1, max: 1, sha256: 'z' } } }, 'opus', root, S), /ölçülmüş bir deneme değil/);
+    assert.throws(() => blind.writeGrades({ ...ok, 'r-b': { 't1#9': { score: 1, max: 1, sha256: 'z' } } }, 'opus', root, S, path.join(root, 'tasks')), /ölçülmüş bir deneme değil/);
     assert.ok(!fs.existsSync(path.join(root, 'r-a', 'grades-opus.json')), 'yarım yazılmamalı');
-    assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1, sha256: 'x' } } }, 'opus', root, S), /için not yok/);
+    assert.throws(() => blind.writeGrades({ 'r-a': { 't1#1': { score: 1, max: 1, sha256: 'x' } } }, 'opus', root, S, path.join(root, 'tasks')), /için not yok/);
     assert.throws(() => blind.writeGrades(ok, 'opus', root), /secret/);
-    assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root, S).length, 1);
+    assert.deepStrictEqual(blind.writeGrades(ok, 'opus', root, S, path.join(root, 'tasks')).length, 1);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -194,7 +199,7 @@ test('anahtarı açma: sonuç klasörlerini değiş tokuş eden anahtar reddedil
     fs.mkdirSync(path.join(root, 'tasks', 't1'), { recursive: true });
     fs.writeFileSync(path.join(root, 'tasks', 't1', 'task.json'), JSON.stringify({ id: 't1', claims: ['c1'] }));
     const key = path.join(root, 'key.json');
-    blind.pack({ dirs: [a, b], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root });
+    blind.pack({ dirs: [a, b], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     const k = JSON.parse(fs.readFileSync(key, 'utf8'));
     const g = Object.fromEntries(Object.keys(k.items).map(i => [i, { claims: { c1: true } }]));
     assert.doesNotThrow(() => blind.unblind(g, k, roots(root)));
@@ -212,7 +217,7 @@ test('paketleme: henüz var olmayan paket klasörüne işaret eden (sarkan) takm
     const out = path.join(root, 'pkg');
     const alias = path.join(root, 'pkg-alias');
     fs.symlinkSync(out, alias, 'junction');
-    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, 'key.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /anahtar/);
     assert.ok(!fs.existsSync(path.join(out, 'key.json')));
     assert.ok(!fs.existsSync(out), 'oluşturulan boş paket klasörü kaldırılmalı');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -225,9 +230,9 @@ test('paketleme: ".." ile başlayan bir dosya adı üst klasör sayılmaz; takma
     const out = path.join(root, 'pkg');
     const alias = path.join(root, 'pkg-alias');
     fs.symlinkSync(out, alias, 'junction');
-    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.throws(() => blind.pack({ dirs: [a], out, key: path.join(alias, '..identity.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /anahtar/);
     assert.ok(!fs.existsSync(path.join(out, '..identity.json')));
-    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'pkg2'), key: path.join(root, 'pkg2', '..identity.json'), seed: 1, resultsRoot: root }), /anahtar/);
+    assert.throws(() => blind.pack({ dirs: [a], out: path.join(root, 'pkg2'), key: path.join(root, 'pkg2', '..identity.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }), /anahtar/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -246,8 +251,39 @@ test('anahtar gizli bir değer taşır; açılan notlar cevap özetini taşır v
     const g = Object.fromEntries(Object.keys(k.items).map(i => [i, { claims: { c1: true } }]));
     const byDir = blind.unblind(g, k, { resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
     assert.match(byDir['r-a']['t1#1'].sha256, /^[0-9a-f]{64}$/);
-    blind.writeGrades(byDir, 'opus', root, k.secret);
+    blind.writeGrades(byDir, 'opus', root, k.secret, path.join(root, 'tasks'));
     const stats = require('./stats.cjs');
-    assert.strictEqual(stats.readGrades(a, 'opus', { secret: k.secret, resultsRoot: root }).verified, true);
+    assert.strictEqual(stats.readGrades(a, 'opus', { secret: k.secret, resultsRoot: root, tasksRoot: path.join(root, 'tasks') }).verified, true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('karışık görev seti: rubrik maddesi olmayan görev pakete girmez; not yazarken de aranmaz', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['rev', 1, 'x'], ['fix', 1, 'patched']]);
+    fs.mkdirSync(path.join(root, 'tasks', 'rev'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', 'rev', 'task.json'), JSON.stringify({ id: 'rev', claims: ['c1'] }));
+    fs.mkdirSync(path.join(root, 'tasks', 'fix'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', 'fix', 'task.json'), JSON.stringify({ id: 'fix' }));
+    const key = path.join(root, 'key.json');
+    const p = blind.pack({ dirs: [a], out: path.join(root, 'p'), key, seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
+    assert.deepStrictEqual(p.skipped, ['fix']);
+    assert.deepStrictEqual(fs.readdirSync(path.join(root, 'p')), ['rev']);
+    const k = JSON.parse(fs.readFileSync(key, 'utf8'));
+    const g = Object.fromEntries(Object.keys(k.items).map(i => [i, { claims: { c1: true } }]));
+    const byDir = blind.unblind(g, k, roots(root));
+    assert.strictEqual(blind.writeGrades(byDir, 'opus', root, k.secret, path.join(root, 'tasks')).length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('paketleme: değişiklik kaydı (.patch) cevabın altına eklenir, model adı ondan da silinir', () => {
+  const root = tmp();
+  try {
+    const a = makeResults(root, 'r-a', 'gpt-x', [['q', 1, 'Done.']]);
+    fs.writeFileSync(path.join(a, 'q.patch'), '--- a/f.js\n+++ b/f.js\n@@ -1,1 +1,1 @@\n-old\n+new // by gpt-x\n');
+    blind.pack({ dirs: [a], out: path.join(root, 'p'), key: path.join(root, 'k.json'), seed: 1, resultsRoot: root, tasksRoot: path.join(root, 'tasks') });
+    const t = fs.readFileSync(path.join(root, 'p', 'q', 'A.md'), 'utf8');
+    assert.match(t, /^Done\.[\s\S]*## Changes \(patch\)[\s\S]*\+new/);
+    assert.ok(!/gpt-x/i.test(t));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

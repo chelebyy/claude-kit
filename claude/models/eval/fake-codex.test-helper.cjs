@@ -155,6 +155,15 @@ if (mode === 'fix') {
   // Sandbox açılamadı der, sonra süreyi aşar: zaman aşımı başarısızlık olarak kalmalı.
   fs.writeFileSync(out, 'I could not run the command: the Windows sandbox backend is unavailable.');
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+} else if (mode === 'fix-exit0') {
+  // Doğru düzeltme, ama yüklenince süreci başarıyla bitirir: kontrol sonuç yazamaz.
+  fs.writeFileSync(path.join(dir, 'paginate.js'), 'process.exit(0);\n' + fixedPaginate());
+  fs.writeFileSync(out, 'Fixed.');
+} else if (mode === 'writes-hidden') {
+  // Gizli test klasörünün adıyla kendi "testini" bırakır.
+  fs.mkdirSync(path.join(dir, '__hidden__'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '__hidden__', 'test.js'), "console.log('ok');\n");
+  fs.writeFileSync(out, 'Done.');
 } else if (mode === 'sandbox-down') {
   fs.writeFileSync(out, 'I could not run the command: the Windows sandbox backend is unavailable.');
 }
