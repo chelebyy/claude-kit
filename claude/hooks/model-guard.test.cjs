@@ -52,6 +52,16 @@ test('bitişik -c model değeri denetlenir', () => {
   allowed(bash('codex exec -cmodel_reasoning_effort=high -m gpt-6-astra -'));
 });
 
+test('nesne prototipindeki adlar kabuk sanılıp denetimi çökertmez', () => {
+  // NESTED_SHELLS düz bir nesnedir: "constructor" ya da "__proto__" gibi bir sözcük kalıtılan bir özelliği
+  // bulup kabuk sanılırsa denetim TypeError atar ve hook çağrıyı engellemeden geçirir (fail-open).
+  for (const word of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+    denied(bash(`: ${word} x; codex exec -m gpt-0-unapproved -`), /gpt-0-unapproved/);
+    denied(bash(`echo ${word} x && codex exec -m gpt-0-unapproved -`), /gpt-0-unapproved/);
+    denied(ps(`Write-Output ${word} x; codex exec -m gpt-0-unapproved -`), /gpt-0-unapproved/);
+  }
+});
+
 test('uzun köşeli parantez dizisi denetimi zaman aşımına sokmaz', () => {
   const t0 = Date.now();
   denied(bash('codex exec -m gpt-0-x' + '['.repeat(200000) + ' -'));
