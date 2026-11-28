@@ -136,9 +136,17 @@ function lexOnce(src, shell, comments, depth0 = 0, heredocBody = false) {
   function list(endChar, depth) {
     let words = [];
     let word = null;
+    // Sözcüğün yönlendirme işareti taşıyıp taşımadığı ve son iki karakteri eklenen parçadan izlenir: her
+    // & | < > karakterinde büyüyen sözcüğün tamamını taramak (düzenli ifade, includes) karesel olurdu.
+    let wordRedir = false;
+    let wordTail = '';
     const pending = [];
-    const add = s => { word = (word === null ? '' : word) + s; };
-    const flushWord = () => { if (word !== null) words.push(word); word = null; };
+    const add = s => {
+      word = (word === null ? '' : word) + s;
+      if (s.includes(REDIR)) wordRedir = true;
+      wordTail = s.length >= 2 ? s.slice(-2) : (wordTail + s).slice(-2);
+    };
+    const flushWord = () => { if (word !== null) words.push(word); word = null; wordRedir = false; wordTail = ''; };
     const flushCmd = () => { flushWord(); if (words.length) out.push(words); words = []; };
 
     while (i < src.length) {
@@ -203,14 +211,14 @@ function lexOnce(src, shell, comments, depth0 = 0, heredocBody = false) {
       // >&, <&, 2>&1, &>log, &>>log: & yönlendirmenin parçasıdır, komut ayırıcı değil (yoksa sonraki
       // sözcükler çağrının dışında kalır: codex exec 2>&1 -m <onaysız> denetlenmezdi).
       // Yalnızca lexer'ın işaretlediği (tırnaksız) < ya da > sonrası: tırnaklı "x>"& yine ayırıcıdır.
-      if ((c === '&' || c === '|') && word !== null && /\u0001[<>]$/.test(word)) { add(REDIR + c); i++; continue; }
+      if ((c === '&' || c === '|') && word !== null && wordTail[0] === REDIR && (wordTail[1] === '<' || wordTail[1] === '>')) { add(REDIR + c); i++; continue; }
       // &>log: önündeki sözcük ayrı bir argümandır (codex&>x exec …: program codex, yönlendirme &>x).
       // cmd'de &> yönlendirme değildir: & komut ayırıcıdır (aşağıda).
       if (c === '&' && src[i + 1] === '>' && shell !== 'cmd') { flushWord(); add(REDIR + c); i++; continue; }
       // Gerçek yönlendirme: önündeki sözcük yalnızca dosya tanımlayıcısı (2>, &>, *>) değilse ayrı bir
       // argümandır (-o>x: argüman -o, yönlendirme >x).
       if (c === '>' || c === '<') {
-        if (word !== null && !/^(?:\d+|&|\*)$/.test(word) && !word.includes(REDIR)) flushWord();
+        if (word !== null && !wordRedir && !/^(?:\d+|&|\*)$/.test(word)) flushWord();
         add(REDIR + c); i++; continue;
       }
       if (c === ';' || c === '&' || c === '|' || c === ')') { i++; flushCmd(); continue; }
@@ -282,7 +290,9 @@ const NESTED_SHELLS = { bash: 'bash', sh: 'bash', zsh: 'bash', dash: 'bash', pws
 // PowerShell bayrak öneki: -, --, /, ayrıca uzun tireler (– — ―); pwsh 7.6.9'da denendi.
 const PS_DASH = String.raw`(?:[-–—―]{1,2}|\/)`;
 const SCRIPT_FLAG = {
-  bash: /^-[a-zA-Z]*c[a-zA-Z]*$/, // -c, -lc, -ec, -xc …
+  // -c, -lc, -ec, -xc … İlk c'den önceki harfler c içermez: tek ayrıştırma yolu kalır, geri izleme
+  // doğrusaldır (eski /^-[a-zA-Z]*c[a-zA-Z]*$/ uzun -ccc…=1 sözcüğünde karesel sürüp hook'u zaman aşımına sokuyordu).
+  bash: /^-[abd-zA-Z]*c[a-zA-Z]*$/,
   // -c, -com, -Command, -CommandWithArgs, -cwa (kısaltmalar dahil)
   ps: new RegExp(String.raw`^${PS_DASH}(?:c(o(m(m(a(n(d(withargs)?)?)?)?)?)?)?|cwa)$`, 'i'),
   cmd: /^[-/]{1,2}[ck]$/i, // /c, /k, Git Bash'te //c
@@ -559,7 +569,9 @@ function securityArgsProblem(args, program) {
       else if (w === '--cyber-access-program') programs.push(value);
       else if (w === '--disable') { if (!/^(?:apps|plugins)$/.test(value)) return `--disable ${value.slice(0, 40)} is not allowed`; }
       else if (w === '-c' || w === '--config') {
-        const kv = value.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.*)$/);
+        // (?!\s): = sonrasındaki boşluk tümüyle tüketilir; yoksa \s* ile (.*) aynı boşluğu paylaşır ve
+        // satır sonlu uzun değerde eşleşme karesel geri izler.
+        const kv = value.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(?!\s)(.*)$/);
         if (!kv || !SEC_CONFIG_KEYS.has(kv[1])) return `config override ${value.slice(0, 40)} is not allowed`;
         if (kv[1] === 'sandbox_mode') sandboxes.push(unquote(kv[2]));
         if (kv[1] === 'windows.sandbox' && unquote(kv[2]) !== 'unelevated') return 'windows.sandbox must be unelevated';
