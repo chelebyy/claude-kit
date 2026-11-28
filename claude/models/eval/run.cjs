@@ -41,8 +41,11 @@ function parseArgs(argv) {
     else if (k === '--repeats') a.repeats = argv[++i];
     else if (k === '--tasks') a.tasksDir = argv[++i];
     else if (k === '--results') a.resultsDir = argv[++i];
-    else if (k === '--codex-windows-sandbox') a.codexWindowsSandbox = argv[++i];
-    else if (k === '--codex-auth-store') a.codexAuthStore = argv[++i];
+    else if (k === '--codex-windows-sandbox' || k === '--codex-auth-store') {
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) throw new Error(`${k} bir değer ister`);
+      a[k === '--codex-auth-store' ? 'codexAuthStore' : 'codexWindowsSandbox'] = v;
+    }
     else throw new Error(`bilinmeyen argüman: ${k}`);
   }
   if (a.split !== undefined && !SPLITS.has(a.split)) throw new Error('--split: dev|frozen');
@@ -212,31 +215,20 @@ function claudeUsage(j) {
 
 // Aday kullanıcının Codex ayarları olmadan başlar: MCP sunucuları (ör. ortak hafıza, GitHub), uygulamalar,
 // plugin'ler, kullanıcı hook'ları, hafıza özelliği ve execpolicy kuralları oturuma yüklenmez. Kullanıcı ayarı yok
-// sayıldığında kaybolan iki değer kullanıcının ayarından okunmaz (ayar dosyası tam TOML'dur, burada ayrıştırılmaz),
-// açık seçenekle verilir: Windows sandbox kipi (--codex-windows-sandbox, varsayılan unelevated) ve giriş
-// bilgilerinin deposu (--codex-auth-store). Sessizce yanlış değer seçilmesin diye, kullanıcı ayarında "elevated"
-// değeri ya da cli_auth_credentials_store anahtarı herhangi bir biçimde geçiyorsa ilgili seçenek zorunludur.
-// Ortam değişkenlerinden yalnızca temel olanlar kabuğa geçer; ağ workspace-write'ta kapalıdır. Bu bir güvenlik
-// sınırı değildir: sandbox okumayı kısıtlamadığı için kasıtlı bir aday kullanıcının dosyalarını okuyup kendi
-// codex sürecini başlatabilir (README "Bilinen sınırlar").
+// sayılınca kaybolan iki değer ayar dosyasından okunmaz (tam TOML'dur; tahmin sessizce yanlış değer seçebilir),
+// seçenekle verilir: Windows'ta sandbox kipi zorunludur (--codex-windows-sandbox elevated|unelevated), giriş
+// bilgilerinin deposu isteğe bağlıdır (--codex-auth-store; verilmezse Codex auth.json dosyasını okur, giriş
+// başarısız olursa deneme ölçülmemiş sayılır). Ortam değişkenlerinden yalnızca temel olanlar kabuğa geçer; ağ
+// workspace-write'ta kapalıdır. Bu bir güvenlik sınırı değildir: sandbox okumayı kısıtlamadığı için kasıtlı bir aday
+// kullanıcının dosyalarını okuyup kendi codex sürecini başlatabilir (README "Bilinen sınırlar").
 const WIN_SANDBOXES = ['elevated', 'unelevated'];
 const AUTH_STORES = ['file', 'keyring', 'auto', 'ephemeral'];
-function userCodexConfigText() {
-  let home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  try { home = fs.realpathSync(home); } catch { /* yoksa ayar da yoktur */ }
-  try { return fs.readFileSync(path.join(home, 'config.toml'), 'utf8'); } catch { return ''; }
-}
 function codexIsolation(a) {
-  const cfg = userCodexConfigText();
-  const mentionsElevated = /(^|[^a-z_])elevated\b/i.test(cfg.replace(/unelevated/gi, ''));
-  if (IS_WIN && a.codexWindowsSandbox === undefined && mentionsElevated) {
-    throw new Error('Codex ayarında "elevated" geçiyor: sandbox kipini --codex-windows-sandbox elevated|unelevated ile açıkça ver');
-  }
-  if (a.codexAuthStore === undefined && /cli_auth_credentials_store/.test(cfg)) {
-    throw new Error('Codex ayarında cli_auth_credentials_store geçiyor: giriş deposunu --codex-auth-store file|keyring|auto|ephemeral ile açıkça ver');
+  if (IS_WIN && !WIN_SANDBOXES.includes(a.codexWindowsSandbox)) {
+    throw new Error("Windows'ta Codex sandbox kipini açıkça ver: --codex-windows-sandbox elevated|unelevated (kullanıcının config.toml'undaki [windows] sandbox değeri)");
   }
   return ['--ignore-user-config', '--ignore-rules', '--disable', 'apps', '--disable', 'plugins',
-    ...(IS_WIN ? ['-c', `windows.sandbox="${a.codexWindowsSandbox || 'unelevated'}"`] : []),
+    ...(IS_WIN ? ['-c', `windows.sandbox="${a.codexWindowsSandbox}"`] : []),
     ...(a.codexAuthStore ? ['-c', `cli_auth_credentials_store="${a.codexAuthStore}"`] : []),
     // Ortam değişkenleri: yalnızca temel değişkenler (PATH, HOME vb.) kabuğa geçer; Codex'in varsayılanı hepsini geçirir.
     '-c', 'shell_environment_policy.inherit="core"',

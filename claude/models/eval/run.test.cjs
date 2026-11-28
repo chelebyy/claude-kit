@@ -18,7 +18,7 @@ const load = id => ({
   base: path.join(tasksDir, id),
   prompt: fs.readFileSync(path.join(tasksDir, id, 'prompt.md'), 'utf8'),
 });
-const args = { model: 'fake', effort: 'low', tier: 'fast', dryRun: false };
+const args = { model: 'fake', effort: 'low', tier: 'fast', codexWindowsSandbox: 'unelevated', dryRun: false };
 
 function runMode(mode, id) {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
@@ -202,10 +202,6 @@ test('kontrol klasörünün üstünde .codex varsa kontrol çalışmaz', () => {
 
 // Gerçek `codex sandbox` (codex kurulu değilse atlanır; model çağrılmaz).
 const runModule = require('./run.cjs');
-// Testler kullanıcının gerçek Codex ayarına (~/.codex/config.toml) bağlı olmasın: boş bir CODEX_HOME.
-const TEST_CODEX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
-process.env.CODEX_HOME = TEST_CODEX_HOME;
-process.on('exit', () => fs.rmSync(TEST_CODEX_HOME, { recursive: true, force: true }));
 let realCodex = null;
 try { realCodex = runModule.codexCommand(); } catch {}
 
@@ -420,7 +416,7 @@ test('sandbox açılamazsa sonuç ölçülmemiş sayılır', () => {
 
 test('--cyber-access-program doğrulanır ve codex exec komutuna geçer', () => {
   const base = ['--model', 'gpt-daybreak-blue-latest', '--effort', 'high'];
-  const a = runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak_blue']);
+  const a = runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak_blue', '--codex-windows-sandbox', 'unelevated']);
   assert.strictEqual(a.cyber, 'daybreak_blue');
   assert.throws(() => runModule.parseArgs([...base, '--tier', 'default', '--cyber-access-program', 'daybreak']), /standard\|daybreak_blue\|daybreak_red/);
   assert.throws(() => runModule.parseArgs([...base, '--tier', 'fast', '--cyber-access-program', 'daybreak_blue']), /--tier default/);
@@ -453,38 +449,34 @@ test('Codex adayı kullanıcının Codex ayarları (MCP, plugin, hook, kural) ol
   }
 });
 
-test('Codex adayı: sandbox kipi ve giriş deposu kullanıcı ayarından okunmaz, belirsizse açık seçenek istenir', () => {
+test('Codex adayı: sandbox kipi ve giriş deposu ayar dosyasından okunmaz, seçenekle verilir', () => {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-codexhome-'));
   const prev = process.env.CODEX_HOME;
-  const cmdWith = (toml, extra = {}) => {
-    fs.writeFileSync(path.join(home, 'config.toml'), toml);
-    return evaluate({ ...args, ...extra, dryRun: true }, load('fix-pagination'), outDir).command;
-  };
   try {
     process.env.CODEX_HOME = home;
-    // Sorunsuz ayar: varsayılan kip, giriş deposu verilmez; MCP tanımı komuta taşınmaz.
-    let cmd = cmdWith('[mcp_servers.x]\ncommand = "evil"\n[windows]\nsandbox = "unelevated"\n');
+    // Ayar dosyası ne derse desin (kaçışlı "elevated", MCP tanımı, giriş deposu) komuta yalnızca seçenekler girer.
+    const escaped = 'sandbox = "' + String.fromCharCode(92) + 'u0065levated"';
+    fs.writeFileSync(path.join(home, 'config.toml'), 'cli_auth_credentials_store = "keyring"\n[mcp_servers.x]\ncommand = "evil"\n[windows]\n' + escaped + '\n');
+    let cmd = evaluate({ ...args, codexWindowsSandbox: 'elevated', dryRun: true }, load('fix-pagination'), outDir).command;
     assert.ok(!cmd.includes('evil') && !cmd.includes('cli_auth_credentials_store'));
-    if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="unelevated" /);
-    // Ayarda "elevated" hangi biçimde geçerse geçsin (tek tırnak, çok satırlı metin, yorum) kip açıkça istenir.
-    for (const toml of ["[windows]\nsandbox = 'elevated'\n", 'x = """\n[windows]\nsandbox = "elevated"\n"""\n', '# back to "elevated" later\n']) {
-      fs.writeFileSync(path.join(home, 'config.toml'), toml);
-      if (process.platform === 'win32') assert.throws(() => runModule.codexIsolation({}), /--codex-windows-sandbox/);
-    }
-    cmd = cmdWith("[windows]\nsandbox = 'elevated'\n", { codexWindowsSandbox: 'elevated' });
     if (process.platform === 'win32') assert.match(cmd, / -c windows\.sandbox="elevated" /);
-    // Giriş deposu anahtarı geçiyorsa (hangi değerle olursa olsun) depo açıkça istenir.
-    fs.writeFileSync(path.join(home, 'config.toml'), "cli_auth_credentials_store = 'keyring'\n");
-    assert.throws(() => runModule.codexIsolation({}), /--codex-auth-store/);
-    // Çalıştırıcı bu durumda deneme başlatmaz: dry-run sonucu komut yerine hata taşır.
-    assert.ok(!evaluate({ ...args, dryRun: true }, load('fix-pagination'), outDir).command);
-    cmd = cmdWith("cli_auth_credentials_store = 'keyring'\n", { codexAuthStore: 'keyring' });
+    cmd = evaluate({ ...args, codexAuthStore: 'keyring', dryRun: true }, load('fix-pagination'), outDir).command;
     assert.match(cmd, / -c cli_auth_credentials_store="keyring" /);
-    // Seçenek değerleri izin listesinden.
+    if (process.platform === 'win32') {
+      // Windows'ta kip zorunlu: verilmezse deneme başlamaz (dry-run komut yerine hata taşır).
+      assert.throws(() => runModule.codexIsolation({}), /--codex-windows-sandbox/);
+      const noMode = { ...args, dryRun: true };
+      delete noMode.codexWindowsSandbox;
+      assert.ok(!evaluate(noMode, load('fix-pagination'), outDir).command);
+    }
+    // Seçenek değerleri izin listesinden; değersiz seçenek reddedilir.
     const base = ['--model', 'gpt-6.1-terra', '--effort', 'medium', '--tier', 'fast'];
+    assert.strictEqual(runModule.parseArgs([...base, '--codex-windows-sandbox', 'unelevated']).codexWindowsSandbox, 'unelevated');
     assert.throws(() => runModule.parseArgs([...base, '--codex-windows-sandbox', 'none']), /elevated\|unelevated/);
     assert.throws(() => runModule.parseArgs([...base, '--codex-auth-store', 'x" -c y']), /file\|keyring/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-windows-sandbox']), /bir değer ister/);
+    assert.throws(() => runModule.parseArgs([...base, '--codex-auth-store', '--split', 'dev']), /bir değer ister/);
     assert.throws(() => runModule.parseArgs(['--model', 'claude-haiku-5-5', '--effort', 'medium', '--codex-auth-store', 'file']), /--codex-/);
   } finally {
     if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
