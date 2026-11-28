@@ -4,12 +4,7 @@ Question: in the new review structure, a separate Codex security review runs for
 
 ## Setup
 
-- Five real commits from this repository. Each contained a security issue that a later review found (see `criteria.md` in the raw folder, written before any run):
-  - A: a comment skip hides commands;
-  - B: exponential nesting that fails open;
-  - C: a heredoc body scan reads past EOF;
-  - D: user plugins and hooks run model code;
-  - E: `<<-` order and a quadratic regex.
+- Five real commits from this repository (cases A–E). Each contained a security issue that a later review found. The criteria (written before any run) and the raw answers are kept in the private task set, not in this public repository, so future models cannot learn the answers.
 - Each model reviewed each commit once, with the same prompt and `codex exec -s read-only`:
   - the prompt said "mandatory review, use `security-review-gate`, scope = this commit, real exploitable issues only";
   - it gave no hint about the known issue.

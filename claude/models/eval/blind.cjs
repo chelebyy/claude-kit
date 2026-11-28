@@ -84,6 +84,7 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
   if (!Number.isInteger(seed)) throw new Error('--seed bir tam sayı olmalı');
   if (under(out, key)) throw new Error('anahtar dosyası paket klasörünün içinde olamaz');
   const groups = new Map();
+  const skipped = new Set();
   for (const dir of dirs) {
     if (!fs.existsSync(dir) || !inside(resultsRoot, dir)) throw new Error(`${dir}: sonuç kökü (${resultsRoot}) içinde değil`);
     const rel = path.relative(fs.realpathSync(resultsRoot), fs.realpathSync(dir)).split(path.sep).join('/');
@@ -94,11 +95,18 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
       const run = t.run === undefined ? 1 : t.run;
       if (!Number.isInteger(run) || run < 1) throw new Error(`${dir}: ${t.id} geçersiz deneme numarası`);
       if (t.pass === null || t.pass === undefined) continue; // ölçülmedi: puanlanmaz
+      // Rubrik maddesi olmayan görev (gizli kontrollü düzeltme) kör puanlanmaz; geçti/kaldı ile sayılır.
+      if (!taskClaims(tasksRoot, t.id)) { skipped.add(t.id); continue; }
       const f = path.join(dir, answerFile(t.id, run));
       const st = fs.lstatSync(f, { throwIfNoEntry: false });
       if (!st || !st.isFile()) throw new Error(`${rel}/${answerFile(t.id, run)}: cevap dosyası yok ya da normal dosya değil`);
       const raw = fs.readFileSync(f);
-      const text = redactModel(raw.toString('utf8'), s.model);
+      // Değişiklik kaydı varsa (çalıştırıcının yazdığı <deneme>.patch) cevabın altına eklenir: kod kalitesi
+      // puanlanırken puanlayıcı yapılan değişikliği görür. Model adı ondan da silinir.
+      const pf = path.join(dir, answerFile(t.id, run).replace(/\.md$/, '.patch'));
+      const pst = fs.lstatSync(pf, { throwIfNoEntry: false });
+      const patch = pst && pst.isFile() ? `\n\n## Changes (patch)\n\n\`\`\`diff\n${fs.readFileSync(pf, 'utf8')}\`\`\`\n` : '';
+      const text = redactModel(raw.toString('utf8') + patch, s.model);
       if (!groups.has(t.id)) groups.set(t.id, []);
       groups.get(t.id).push({ dir: rel, id: t.id, run, model: s.model, effort: s.effort || null, sha256: sha256(raw), text });
     }
@@ -132,7 +140,7 @@ function pack({ dirs, out, key, seed, resultsRoot = path.join(ROOT, 'results'), 
   // claims yalnızca bilgi içindir; unblind maddeleri anahtardan değil görev tanımından okur.
   // secret: not dosyalarını imzalamak için (writeGrades); anahtarı olmayan biri not uyduramaz.
   fs.writeFileSync(key, JSON.stringify({ seed, secret: crypto.randomBytes(32).toString('hex'), items, claims }, null, 2) + '\n', { flag: 'wx' });
-  return { items: Object.keys(items).length, tasks: groups.size };
+  return { items: Object.keys(items).length, tasks: groups.size, skipped: [...skipped].sort() };
 }
 
 function claimsOf(g, item) {
@@ -213,7 +221,7 @@ function unblind(grades, key, { resultsRoot = path.join(ROOT, 'results'), tasksR
   return out;
 }
 
-function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results'), secret) {
+function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results'), secret, tasksRoot = path.join(ROOT, 'tasks')) {
   if (!SLUG_RE.test(label || '')) throw new Error('--label geçerli bir ad olmalı');
   if (!(typeof secret === 'string' && /^[0-9a-f]{64}$/.test(secret))) throw new Error('anahtar dosyasında secret yok');
   const plan = [];
@@ -223,7 +231,7 @@ function writeGrades(byDir, label, resultsRoot = path.join(ROOT, 'results'), sec
     // Notlar özetteki ölçülmüş denemelerle birebir eşleşmeli: başka bir göreve ya da denemeye not yazılamaz,
     // ölçülmüş bir deneme notsuz kalamaz.
     const s = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8'));
-    const measured = new Set((Array.isArray(s.tasks) ? s.tasks : []).filter(t => t.pass === true || t.pass === false)
+    const measured = new Set((Array.isArray(s.tasks) ? s.tasks : []).filter(t => (t.pass === true || t.pass === false) && taskClaims(tasksRoot, t.id))
       .map(t => `${t.id}#${t.run === undefined ? 1 : t.run}`));
     for (const k of Object.keys(grades)) if (!measured.has(k)) throw new Error(`${rel}: ${k} özette ölçülmüş bir deneme değil`);
     for (const k of measured) if (!has(grades, k)) throw new Error(`${rel}: ${k} için not yok`);
@@ -245,20 +253,28 @@ function opt(argv, name) {
   return v;
 }
 
+// --results <kök> ve --tasks <klasör>: depo dışındaki (özel) görev seti için (run.cjs --tasks ile aynı).
+function rootsFrom(rest) {
+  const r = opt(rest, '--results'), t = opt(rest, '--tasks');
+  return { ...(r ? { resultsRoot: path.resolve(r) } : {}), ...(t ? { tasksRoot: path.resolve(t) } : {}) };
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   const readJson = f => JSON.parse(fs.readFileSync(f, 'utf8'));
   if (cmd === 'pack') {
     const out = opt(rest, '--out'), key = opt(rest, '--key'), seed = Number(opt(rest, '--seed'));
-    if (!out || !key || !rest.length) throw new Error('kullanım: pack --out <paket> --key <anahtar.json> --seed <n> <sonuç-klasörü>...');
-    return pack({ dirs: rest, out, key, seed });
+    const roots = rootsFrom(rest);
+    if (!out || !key || !rest.length) throw new Error('kullanım: pack --out <paket> --key <anahtar.json> --seed <n> [--results <kök>] [--tasks <klasör>] <sonuç-klasörü>...');
+    return pack({ dirs: rest, out, key, seed, ...roots });
   }
   if (cmd === 'agree' && rest.length === 2) return agreement(readJson(rest[0]), readJson(rest[1]));
   if (cmd === 'unblind') {
     const key = opt(rest, '--key'), label = opt(rest, '--label');
+    const roots = rootsFrom(rest);
     if (!key || !label || rest.length !== 1) throw new Error('kullanım: unblind <notlar.json> --key <anahtar.json> --label <ad>');
     const k = readJson(key);
-    return { written: writeGrades(unblind(readJson(rest[0]), k), label, undefined, k.secret) };
+    return { written: writeGrades(unblind(readJson(rest[0]), k, roots), label, roots.resultsRoot, k.secret, roots.tasksRoot) };
   }
   throw new Error('komut: pack | agree | unblind');
 }

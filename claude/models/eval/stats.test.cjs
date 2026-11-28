@@ -303,3 +303,18 @@ test('onay: kontrol klasörü denetimine takılan deneme kural ihlali gibi engel
   Object.assign(a.tasks[0], { pass: false, checkSkipped: 'work dir changed after the model run: x' });
   assert.ok(approvalCheck(a, frozenSummary('gpt-base', IDS, () => true), EXP, OK).blockers.some(x => /kural ihlali|denetim/.test(x)));
 });
+
+test('karışık görev seti: kör not yalnızca rubrik maddeli görevlerde aranır, ötekiler geçti/kaldı ile puanlanır', () => {
+  const graded = new Set(['rev']);
+  assert.strictEqual(scoreOf({ id: 'fix', run: 1, pass: true }, {}, graded), 1);
+  assert.strictEqual(scoreOf({ id: 'fix', run: 1, pass: false }, {}, graded), 0);
+  assert.throws(() => scoreOf({ id: 'rev', run: 1, pass: true }, {}, graded), /not eksik/);
+  const A = [...runs('rev', [true]), ...runs('fix', [true]), ...runs('fix2', [false])];
+  const c = pairedCompare(A, A, { gradesA: { 'rev#1': { score: 1, max: 2 } }, gradesB: { 'rev#1': { score: 1, max: 2 } }, graded, seed: 1 });
+  assert.strictEqual(c.tasks, 3);
+});
+
+test('kontrolü olan kör puanlı görevde kontrol başarısızsa puan 0 (iyi not kurtarmaz)', () => {
+  assert.strictEqual(scoreOf({ id: 'q', run: 1, pass: false, checkPassed: false }, { 'q#1': { score: 4, max: 4 } }, new Set(['q'])), 0);
+  assert.strictEqual(scoreOf({ id: 'q', run: 1, pass: true, checkPassed: true }, { 'q#1': { score: 3, max: 4 } }, new Set(['q'])), 0.75);
+});

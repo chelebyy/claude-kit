@@ -653,26 +653,14 @@ test('sec-review-fileserver desenleri: olumsuz açıklama isabet sayılmaz', () 
   ].join('\n')), ['prefix-bypass', 'reflected-xss', 'ssrf-allowlist']);
 });
 
-// Görev setinin kendisi: her görev yüklenir, tohumlanan hata gönderildiği haliyle gerçekten vardır
-// (düzeltme görevlerinde kontrol, düzeltilmemiş fixture'da başarısız olur) ve güvenlik görevlerinin
-// model çalıştırılmadan önce sabitlenmiş bir rubric.md'si vardır.
+// Görev setinin kendisi (bkz. validate-tasks.cjs): her görev yüklenir, tohumlanan hata gerçekten vardır,
+// başvuru düzeltmesi geçer, process.exit(0) ekleyen çözüm geçmez, rubrik ve claims kuralları tutar.
+const { validateTask } = require('./validate-tasks.cjs');
 for (const id of fs.readdirSync(tasksDir)) {
   test(`görev ${id}: tanım geçerli, hata fixture'da mevcut`, () => {
     const t = load(id);
     assert.strictEqual(t.id, id);
-    assert.ok(t.prompt.trim().length > 0);
-    if (t.roles.includes('security')) assert.ok(fs.existsSync(path.join(t.base, 'rubric.md')), 'güvenlik görevinin rubric.md dosyası olmalı');
-    for (const e of t.expect || []) new RegExp(e.pattern, 'i');
-    for (const [file, ranges] of Object.entries(t.decoys || {})) {
-      const lines = fs.readFileSync(path.join(t.base, 'fixture', file), 'utf8').split('\n').length;
-      for (const [lo, hi] of ranges) assert.ok(lo >= 1 && lo <= hi && hi <= lines, `${file} tuzak aralığı ${lo}-${hi}`);
-    }
-    if (t.check) {
-      const [cmd, ...rest] = t.check.command.split(' ');
-      assert.strictEqual(cmd, 'node');
-      const r = require('child_process').spawnSync(process.execPath, rest, { cwd: path.join(t.base, 'fixture'), encoding: 'utf8' });
-      assert.notStrictEqual(r.status, 0, 'kontrol düzeltilmemiş fixture üzerinde başarısız olmalı');
-    }
+    validateTask(t);
   });
 }
 
@@ -1030,4 +1018,279 @@ test('kilit alındıktan sonraki her adım hata verse de kilit bırakılır', ()
   const body = src.slice(src.indexOf('const release = a.dryRun'), src.indexOf('  } finally {\n    release();'));
   // acquireLock'tan sonra try'a kadar yalnızca try açılışı olmalı: arada atabilen bir adım kalmamalı.
   assert.match(body, /^const release = a\.dryRun \? \(\) => \{\} : acquireLock\(outDir\);\n  try \{/);
+});
+
+// --- Gizli kontrol dosyaları (hidden/) ---
+
+function hiddenTask() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-hidden-task-'));
+  fs.mkdirSync(path.join(base, 'fixture'));
+  fs.copyFileSync(path.join(tasksDir, 'fix-pagination', 'fixture', 'paginate.js'), path.join(base, 'fixture', 'paginate.js'));
+  fs.mkdirSync(path.join(base, 'hidden'));
+  fs.writeFileSync(path.join(base, 'hidden', 'test.js'), fs.readFileSync(path.join(tasksDir, 'fix-pagination', 'fixture', 'test.js'), 'utf8').replace("require('./paginate.js')", "require('../paginate.js')"));
+  return { id: 'hidden-demo', kind: 'fix', roles: ['workhorse'], sandbox: 'workspace-write', check: { command: 'node __hidden__/test.js' }, timeoutSec: 60, base, prompt: 'fix paginate.js' };
+}
+
+test('gizli kontrol: model testi görmez; doğru düzeltme gizli testten geçer, düzeltmeyen kalır', () => {
+  const t = hiddenTask();
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'fix';
+    const good = evaluate(args, t, outDir);
+    assert.strictEqual(good.checkPassed, true, JSON.stringify(good));
+    assert.strictEqual(good.pass, true);
+    process.env.FAKE_MODE = 'ok-no-op';
+    const none = evaluate(args, t, outDir);
+    assert.strictEqual(none.checkPassed, false);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+test('gizli kontrol: model __hidden__/ altına dosya bırakırsa kontrol çalışmaz, başarısızdır', () => {
+  const t = hiddenTask();
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'writes-hidden';
+    const r = evaluate(args, t, outDir);
+    assert.match(r.checkSkipped || '', /__hidden__/);
+    assert.strictEqual(r.pass, false);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+
+test('doğrulayıcı: kontrol komutu sonuç yazmadan biterse ya da sonuç yanlışsa deneme başarısızdır', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-verify-task-'));
+  fs.mkdirSync(path.join(base, 'fixture'));
+  fs.copyFileSync(path.join(tasksDir, 'fix-pagination', 'fixture', 'paginate.js'), path.join(base, 'fixture', 'paginate.js'));
+  fs.mkdirSync(path.join(base, 'hidden'));
+  fs.writeFileSync(path.join(base, 'hidden', 'collect.js'), "const fs = require('fs'), path = require('path');\nconst { paginate } = require('../paginate.js');\nfs.writeFileSync(path.join(__dirname, 'results.json'), JSON.stringify(paginate([1,2,3,4,5,6,7,8,9,10], 4, 3)));\n");
+  fs.mkdirSync(path.join(base, 'verify'));
+  fs.writeFileSync(path.join(base, 'verify', 'v.js'), "exports.verify = r => ({ ok: JSON.stringify(r) === JSON.stringify({ items: [10], pages: 4 }), failures: ['wrong'] });\n");
+  const t = { id: 'verify-demo', kind: 'fix', roles: ['workhorse'], sandbox: 'workspace-write', check: { command: 'node __hidden__/collect.js', verify: 'v.js' }, timeoutSec: 60, base, prompt: 'fix' };
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'fix';
+    assert.strictEqual(evaluate(args, t, outDir).checkPassed, true);
+    process.env.FAKE_MODE = 'ok-no-op';
+    const wrong = evaluate(args, t, outDir);
+    assert.strictEqual(wrong.checkPassed, false);
+    assert.deepStrictEqual(wrong.verifyFailures, ['wrong']);
+    process.env.FAKE_MODE = 'fix-exit0';
+    const exited = evaluate(args, t, outDir);
+    assert.strictEqual(exited.checkPassed, false);
+    assert.match(exited.verifyFailures[0], /no results\.json/);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('doğrulayıcıdan önce results.json biçimi taranır: aşırı derin ya da çok değerli JSON reddedilir', () => {
+  assert.strictEqual(runModule.jsonShapeProblem('[{"a":"[[[["},[1,2]]'), null);
+  assert.match(runModule.jsonShapeProblem('['.repeat(65) + ']'.repeat(65)), /deeper/);
+  assert.strictEqual(runModule.jsonShapeProblem('['.repeat(64) + ']'.repeat(64)), null);
+  assert.match(runModule.jsonShapeProblem('[' + '0,'.repeat(2000001) + '0]'), /too many/);
+  assert.strictEqual(runModule.jsonShapeProblem('["\\"[[[[[", 1]'), null);
+});
+
+test('--tasks ve --results: var olan klasör olmalı; görevler verilen klasörden yüklenir', () => {
+  const base = ['--model', 'gpt-x', '--effort', 'high', '--tier', 'default'];
+  assert.throws(() => runModule.parseArgs([...base, '--tasks', path.join(os.tmpdir(), 'yok-' + Date.now())]), /--tasks/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-ext-tasks-'));
+  try {
+    fs.cpSync(path.join(tasksDir, 'fix-pagination'), path.join(dir, 'fix-pagination'), { recursive: true });
+    const a = runModule.parseArgs([...base, '--tasks', dir]);
+    assert.strictEqual(a.tasksDir, fs.realpathSync(dir));
+    assert.deepStrictEqual(runModule.loadTasks(undefined, undefined, a.tasksDir).map(t => t.id), ['fix-pagination']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// --- Ayrı süreçli kontrol adımları ve değişiklik kaydı (2026-11-28) ---
+
+function stepTask(stepCode, stepTimeoutMs) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-steps-task-'));
+  fs.mkdirSync(path.join(base, 'fixture'));
+  fs.copyFileSync(path.join(tasksDir, 'fix-pagination', 'fixture', 'paginate.js'), path.join(base, 'fixture', 'paginate.js'));
+  fs.mkdirSync(path.join(base, 'hidden'));
+  fs.writeFileSync(path.join(base, 'hidden', 'collect.js'), "const fs = require('fs'), path = require('path');\nconst { paginate } = require('../paginate.js');\nfs.writeFileSync(path.join(__dirname, 'results.json'), JSON.stringify(paginate([1,2,3,4,5,6,7,8,9,10], 4, 3)));\n");
+  fs.writeFileSync(path.join(base, 'hidden', 'step.js'), stepCode);
+  fs.mkdirSync(path.join(base, 'verify'));
+  fs.writeFileSync(path.join(base, 'verify', 'v.js'), "exports.verify = r => ({ ok: JSON.stringify(r.main) === JSON.stringify({ items: [10], pages: 4 }) && r.steps.length === 1 && r.steps[0] === 'done', failures: ['wrong: ' + JSON.stringify(r)] });\n");
+  return { id: 'steps-demo', kind: 'fix', roles: ['workhorse'], sandbox: 'workspace-write', timeoutSec: 60, base, prompt: 'fix',
+    check: { command: 'node __hidden__/collect.js', verify: 'v.js', steps: [{ command: 'node __hidden__/step.js', timeoutMs: stepTimeoutMs }] } };
+}
+
+test('kontrol adımları: her adım kendi sürecinde ve kendi süre sınırıyla çalışır; doğrulayıcı { main, steps } alır', () => {
+  const ok = stepTask("require('fs').writeFileSync(require('path').join(__dirname, 'results-step0.json'), JSON.stringify('done'));\n", 5000);
+  const slow = stepTask("const t = Date.now(); while (Date.now() - t < 8000) {}\nrequire('fs').writeFileSync(require('path').join(__dirname, 'results-step0.json'), JSON.stringify('done'));\n", 2000);
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'fix';
+    const r1 = evaluate(args, ok, outDir);
+    assert.strictEqual(r1.checkPassed, true, JSON.stringify(r1));
+    const r2 = evaluate(args, slow, outDir);
+    assert.strictEqual(r2.checkPassed, false);
+    assert.strictEqual(r2.checkTimedOut, true);
+    assert.strictEqual(r2.stepTimedOut, 0);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    fs.rmSync(ok.base, { recursive: true, force: true });
+    fs.rmSync(slow.base, { recursive: true, force: true });
+  }
+});
+
+test('kontrol adımları: tanım denetlenir (en çok 10 adım, node komutu, süre 1000-600000 ms)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-steps-def-'));
+  try {
+    fs.cpSync(path.join(tasksDir, 'fix-pagination'), path.join(dir, 'fix-pagination'), { recursive: true });
+    const tj = path.join(dir, 'fix-pagination', 'task.json');
+    const base = JSON.parse(fs.readFileSync(tj, 'utf8'));
+    for (const steps of [[{ command: 'bash x', timeoutMs: 2000 }], [{ command: 'node x.js', timeoutMs: 10 }], 'x', Array.from({ length: 11 }, () => ({ command: 'node x.js', timeoutMs: 2000 }))]) {
+      fs.writeFileSync(tj, JSON.stringify({ ...base, check: { ...base.check, steps } }));
+      assert.throws(() => runModule.loadTasks(undefined, undefined, dir), /steps/, JSON.stringify(steps).slice(0, 60));
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('değişiklik kaydı: modelin değiştirdiği dosyalar <görev>.patch olarak saklanır (birleşik diff)', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  process.env.FAKE_MODE = 'fix';
+  try {
+    const r = evaluate(args, { ...load('fix-pagination'), run: 2 }, outDir);
+    assert.strictEqual(r.patchFile, 'fix-pagination.run2.patch');
+    const p = fs.readFileSync(path.join(outDir, r.patchFile), 'utf8');
+    assert.match(p, /^--- a\/paginate\.js$/m);
+    assert.match(p, /^\+\+\+ b\/paginate\.js$/m);
+    assert.match(p, /^-  const pages = Math\.floor\(items\.length \/ pageSize\);$/m);
+    assert.match(p, /^\+  const pages = Math\.ceil\(items\.length \/ pageSize\);$/m);
+    assert.match(p, /^@@ -\d+,\d+ \+\d+,\d+ @@/m);
+  } finally { fs.rmSync(outDir, { recursive: true, force: true }); }
+});
+
+test('değişiklik kaydı: eklenen ve silinen dosyalar, ikili içerik ve büyük dosya', () => {
+  const d = runModule.unifiedDiff;
+  assert.strictEqual(d('a\nb\n', 'a\nb\n', 'x'), '');
+  assert.match(d(null, 'new\n', 'n.js'), /^--- \/dev\/null\n\+\+\+ b\/n\.js\n@@ -0,0 \+1,1 @@\n\+new/);
+  assert.match(d('old\n', null, 'o.js'), /^--- a\/o\.js\n\+\+\+ \/dev\/null\n@@ -1,1 \+0,0 @@\n-old/);
+  assert.match(d('a' + String.fromCharCode(0), 'b', 'bin'), /Binary file bin differs/);
+  const big = Array.from({ length: 5000 }, (_, i) => 'l' + i).join('\n');
+  assert.match(d(big, big.replace('l10\n', 'X\n').replace('l4000', 'Y'), 'big.js'), /^-l10$/m);
+});
+
+test('kontrol adımları: ana kontrolün önceden yazdığı adım sonucu ve bir adımın önceki sonucu değiştirmesi işe yaramaz', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-steps-forge-'));
+  fs.mkdirSync(path.join(base, 'verify'));
+  fs.writeFileSync(path.join(base, 'verify', 'v.js'), "exports.verify = r => ({ ok: r.main === 'main' && r.steps[0] === 's0' && r.steps[1] === 's1', failures: [JSON.stringify(r)] });\n");
+  const t = { base, check: { command: 'node main.js', verify: 'v.js', steps: [{ command: 'node s0.js', timeoutMs: 5000 }, { command: 'node s1.js', timeoutMs: 5000 }] } };
+  const dirsMade = [];
+  const dirs = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-steps-dir-')); fs.mkdirSync(path.join(d, runModule.HIDDEN_DIR)); dirsMade.push(d); return { dir: d }; };
+  const W = (dir, name, v) => fs.writeFileSync(path.join(dir, runModule.HIDDEN_DIR, name), JSON.stringify(v));
+  try {
+    // Ana kontrol, adım 0'ın sonucunu (kendi klasörüne) önceden yazar; adım 0 hiçbir şey yazmadan biter.
+    const r1 = runModule.runChecks(t, dirs, (cmd, ms, dir) => {
+      if (cmd === 'node main.js') { W(dir, 'results.json', 'main'); W(dir, 'results-step0.json', 's0'); }
+      if (cmd === 'node s1.js') W(dir, 'results-step1.json', 's1');
+      return { passed: true };
+    });
+    assert.strictEqual(r1.passed, false);
+    assert.match(r1.verifyFailures[0], /no results-step0\.json/);
+    // Adım 1, önceki sonuçları yeniden yazar: her süreç ayrı klasörde olduğu için okunan değerler değişmez.
+    const r2 = runModule.runChecks(t, dirs, (cmd, ms, dir) => {
+      if (cmd === 'node main.js') W(dir, 'results.json', 'main');
+      if (cmd === 'node s0.js') W(dir, 'results-step0.json', 'wrong');
+      if (cmd === 'node s1.js') { W(dir, 'results-step1.json', 's1'); W(dir, 'results-step0.json', 's0'); }
+      return { passed: true };
+    });
+    assert.strictEqual(r2.passed, false);
+    const names = { 'node main.js': ['results.json', 'main'], 'node s0.js': ['results-step0.json', 's0'], 'node s1.js': ['results-step1.json', 's1'] };
+    assert.strictEqual(runModule.runChecks(t, dirs, (cmd, ms, dir) => { W(dir, ...names[cmd]); return { passed: true }; }).passed, true);
+    assert.strictEqual(new Set(dirsMade).size, dirsMade.length);
+  } finally { for (const d of dirsMade) fs.rmSync(d, { recursive: true, force: true }); fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('check.fixturePasses yalnızca true olabilir ve kör puanlama maddesi (claims) gerektirir', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-fp-'));
+  try {
+    fs.cpSync(path.join(tasksDir, 'fix-pagination'), path.join(dir, 'fix-pagination'), { recursive: true });
+    const tj = path.join(dir, 'fix-pagination', 'task.json');
+    const base = JSON.parse(fs.readFileSync(tj, 'utf8'));
+    fs.writeFileSync(tj, JSON.stringify({ ...base, check: { ...base.check, fixturePasses: true } }));
+    assert.throws(() => runModule.loadTasks(undefined, undefined, dir), /fixturePasses/);
+    fs.writeFileSync(tj, JSON.stringify({ ...base, claims: ['c'], check: { ...base.check, fixturePasses: 'yes' } }));
+    assert.throws(() => runModule.loadTasks(undefined, undefined, dir), /fixturePasses/);
+    fs.writeFileSync(tj, JSON.stringify({ ...base, claims: ['c'], check: { ...base.check, fixturePasses: true } }));
+    assert.strictEqual(runModule.loadTasks(undefined, undefined, dir).length, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('kontrol adımları: her süreç temiz bir klasörde çalışır; ana kontrol sonraki adımın dosyalarını değiştiremez', () => {
+  // Gerçek adım yavaş (süre sınırını aşar); ana kontrol onu hızlı ve "başarılı" bir sürümle değiştirmeye çalışır.
+  const slowStep = "const t = Date.now(); while (Date.now() - t < 8000) {}\nrequire('fs').writeFileSync(require('path').join(__dirname, 'results-step0.json'), JSON.stringify('done'));\n";
+  const t = stepTask(slowStep, 2000);
+  fs.writeFileSync(path.join(t.base, 'hidden', 'collect.js'), "const fs = require('fs'), path = require('path');\nconst { paginate } = require('../paginate.js');\nfs.writeFileSync(path.join(__dirname, 'step.js'), \"require('fs').writeFileSync(require('path').join(__dirname, 'results-step0.json'), JSON.stringify('done'));\");\nfs.writeFileSync(path.join(__dirname, 'results.json'), JSON.stringify(paginate([1,2,3,4,5,6,7,8,9,10], 4, 3)));\n");
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'fix';
+    const r = evaluate(args, t, outDir);
+    assert.strictEqual(r.checkPassed, false, JSON.stringify(r));
+    assert.strictEqual(r.stepTimedOut, 0);
+  } finally { fs.rmSync(outDir, { recursive: true, force: true }); fs.rmSync(t.base, { recursive: true, force: true }); }
+});
+
+test('sonuç dosyasının adında bir klasör bırakan kontrol başarısızdır, "ölçülmedi" değil', () => {
+  const t = stepTask("require('fs').writeFileSync(require('path').join(__dirname, 'results-step0.json'), JSON.stringify('done'));\n", 5000);
+  fs.writeFileSync(path.join(t.base, 'hidden', 'collect.js'), "require('fs').mkdirSync(require('path').join(__dirname, 'results.json'));\n");
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-test-out-'));
+  try {
+    process.env.FAKE_MODE = 'fix';
+    const r = evaluate(args, t, outDir);
+    assert.strictEqual(r.pass, false, JSON.stringify(r));
+    assert.strictEqual(r.checkPassed, false);
+    assert.ok(!r.environmentError && !r.error, JSON.stringify(r));
+  } finally { fs.rmSync(outDir, { recursive: true, force: true }); fs.rmSync(t.base, { recursive: true, force: true }); }
+});
+
+test('değişiklik kaydı: dosya sonundaki satır başı farkı kaydedilir; çok satırlı ya da büyük dosya özetlenir', () => {
+  const d = runModule.unifiedDiff;
+  assert.match(d('a', 'a\n', 'x'), /^-a\n\\ No newline at end of file\n\+a$/m);
+  assert.match(d('a\n', 'b', 'x'), /^\+b\n\\ No newline at end of file$/m);
+  const many = '\n'.repeat(3000000);
+  const p = d(null, many, 'big.txt');
+  assert.ok(p.length < 2000, p.length);
+  assert.match(p, /too large/);
+});
+
+test('değişiklik kaydı anlık görüntüye bağlıdır: sonradan silinen, değişen ya da beliren dosya kaydedilmez', () => {
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-cp-fx-'));
+  const wk = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-cp-wk-'));
+  try {
+    fs.writeFileSync(path.join(fx, 'a.js'), 'old\n');
+    fs.writeFileSync(path.join(wk, 'b.js'), 'late\n');
+    const h = t => require('crypto').createHash('sha256').update(t).digest('hex');
+    const after = new Map([['a.js', h('new\n')], ['c.js', h('kept\n')]]);
+    fs.writeFileSync(path.join(wk, 'c.js'), 'changed later\n');
+    const p = runModule.changesPatch(fx, wk, ['a.js', 'b.js', 'c.js'], after);
+    assert.match(p, /a\/a\.js[\s\S]*changed after the model run/);
+    assert.match(p, /b\/b\.js\n\(changed after the model run/);
+    assert.match(p, /b\/c\.js\n\(changed after the model run/);
+    assert.ok(!/^\+late|^\+changed later|^-old/m.test(p), p);
+  } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(wk, { recursive: true, force: true }); }
+});
+
+test('değişiklik kaydı: büyük dosya sınırlı okunur ve yalnızca özetlenir', () => {
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-cp-fx-'));
+  const wk = fs.mkdtempSync(path.join(os.tmpdir(), 'model-eval-cp-wk-'));
+  try {
+    const big = 'x'.repeat(600 * 1024);
+    fs.writeFileSync(path.join(wk, 'big.js'), big);
+    const after = new Map([['big.js', require('crypto').createHash('sha256').update(big).digest('hex')]]);
+    const p = runModule.changesPatch(fx, wk, ['big.js'], after);
+    assert.match(p, /file too large for a diff/);
+    assert.ok(p.length < 500);
+  } finally { fs.rmSync(fx, { recursive: true, force: true }); fs.rmSync(wk, { recursive: true, force: true }); }
 });
